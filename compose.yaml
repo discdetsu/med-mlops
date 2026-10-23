@@ -1,0 +1,168 @@
+# Local infrastructure. Start with `docker compose up -d`.
+# Secrets come from `.env` (see `.env.example`). Ports bind to 127.0.0.1 only.
+
+name: cxr
+
+x-airflow: &airflow
+  image: apache/airflow:3.3.2-python3.14
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?}@postgres:5432/airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?}
+    # Local dev only: no login, everyone is admin. Replace before exposing Airflow anywhere.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      APP_DB_PASSWORD: ${CXR_DB_PASSWORD:?}
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD:?}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - 127.0.0.1:5432:5432
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rustfs:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_ACCESS_KEY: ${CXR_S3_ACCESS_KEY:?}
+      RUSTFS_SECRET_KEY: ${CXR_S3_SECRET_KEY:?}
+      RUSTFS_ADDRESS: :9000
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: :9001
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - 127.0.0.1:9000:9000 # S3 API
+      - 127.0.0.1:9001:9001 # console
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9000/health]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create buckets. Safe to re-run.
+  rustfs-init:
+    image: amazon/aws-cli:2.38.5
+    environment:
+      AWS_ACCESS_KEY_ID: ${CXR_S3_ACCESS_KEY:?}
+      AWS_SECRET_ACCESS_KEY: ${CXR_S3_SECRET_KEY:?}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://rustfs:9000
+      BUCKETS: ${CXR_S3_BUCKET:-cxr} mlflow
+    entrypoint: [/bin/sh, -c]
+    command:
+      - |
+        set -e
+        for b in $$BUCKETS; do
+          aws s3api head-bucket --bucket "$$b" 2>/dev/null || aws s3api create-bucket --bucket "$$b"
+          echo "bucket ready: $$b"
+        done
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  mlflow:
+    build: infra/mlflow
+    image: cxr-mlflow:3.17.2
+    environment:
+      AWS_ACCESS_KEY_ID: ${CXR_S3_ACCESS_KEY:?}
+      AWS_SECRET_ACCESS_KEY: ${CXR_S3_SECRET_KEY:?}
+      AWS_DEFAULT_REGION: us-east-1
+      MLFLOW_S3_ENDPOINT_URL: http://rustfs:9000
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql+psycopg2://mlflow:${MLFLOW_DB_PASSWORD:?}@postgres:5432/mlflow
+      - --artifacts-destination=s3://mlflow
+      - --serve-artifacts
+      - --allowed-hosts=localhost:*,127.0.0.1:*,mlflow:*
+    ports:
+      - 127.0.0.1:5000:5000
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    hostname: rabbitmq # node name is tied to hostname; keeps data across recreates
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - 127.0.0.1:5672:5672 # AMQP
+      - 127.0.0.1:15672:15672 # management UI
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # One-shot: migrate the Airflow metadata DB.
+  airflow-init:
+    <<: *airflow
+    command: [db, migrate]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow
+    command: api-server
+    ports:
+      - 127.0.0.1:8080:8080
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/api/v2/monitor/health]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  airflow-scheduler:
+    <<: *airflow
+    command: scheduler
+    depends_on:
+      <<: *airflow-depends
+      airflow-apiserver:
+        condition: service_healthy
+
+  airflow-dag-processor:
+    <<: *airflow
+    command: dag-processor
+
+volumes:
+  postgres-data:
+  rustfs-data:
+  rabbitmq-data:
+  airflow-logs:
