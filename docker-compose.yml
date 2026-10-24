@@ -1,0 +1,251 @@
+# Profiles:
+#   core: upload → heatmap demo and promotion through Django admin
+#   full: core + training, monitoring, and labeling loop
+# Phase 0 ships the infrastructure only. Nginx, the web UI, Django, and the Celery
+# worker are added to `core` in Phase 2; the Prefect worker is added in Phase 1.
+name: cxr-mlops
+
+# One set of S3 settings for every client (boto3, MLflow, DVC, aws-cli), so the
+# object store can be swapped by changing .env only. See docs/adr/0001.
+x-s3-env: &s3-env
+  AWS_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://rustfs:9000}
+  MLFLOW_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://rustfs:9000}
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set in .env}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set in .env}
+  AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+  # MLflow clients stream artifacts through the tracking server instead of presigned
+  # S3 URLs, so they never need to reach the object store directly.
+  MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+  MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
+
+x-healthcheck: &healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 20s
+
+services:
+  # ---------------------------------------------------------------- core
+
+  postgres:
+    image: postgres:18.6-alpine
+    profiles: [core, full]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set in .env}
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD:?set in .env}
+      PREFECT_DB_PASSWORD: ${PREFECT_DB_PASSWORD:?set in .env}
+      LABELSTUDIO_DB_PASSWORD: ${LABELSTUDIO_DB_PASSWORD:?set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./compose/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      <<: *healthcheck
+      # -h forces TCP so the temporary init server (socket only) doesn't count as ready
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+
+  rustfs:
+    image: rustfs/rustfs:1.0.3
+    profiles: [core, full]
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:?set in .env}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?set in .env}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+
+  rustfs-init:
+    image: amazon/aws-cli:2.38.5
+    profiles: [core, full]
+    environment:
+      <<: *s3-env
+      INFERENCE_RAW_RETENTION_DAYS: ${INFERENCE_RAW_RETENTION_DAYS:-30}
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    volumes:
+      - ./compose/rustfs/init.sh:/init/init.sh:ro
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4.4.0-management-alpine
+    profiles: [core, full]
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set in .env}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./compose/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+
+  rabbitmq-init:
+    image: rabbitmq:4.4.0-management-alpine
+    profiles: [core, full]
+    environment:
+      RABBITMQ_USER: ${RABBITMQ_USER:?set in .env}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set in .env}
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    volumes:
+      - ./compose/rabbitmq/init.sh:/init/init.sh:ro
+      - ./compose/rabbitmq/definitions.json:/init/definitions.json:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  mlflow:
+    build: ./compose/mlflow
+    image: cxr-mlops/mlflow:3.17.2
+    profiles: [core, full]
+    environment:
+      <<: *s3-env
+      MLFLOW_DB_PASSWORD: ${MLFLOW_DB_PASSWORD:?set in .env}
+      # The job runner backs MLflow's GenAI features (unused here) and spawns ~6
+      # huey consumers at ~250 MB each. With it and extra workers off: ~2.4 GB → ~0.4 GB.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    command: >
+      sh -c 'exec mlflow server
+      --host 0.0.0.0 --port 5000 --workers 1
+      --backend-store-uri "postgresql+psycopg2://mlflow:$${MLFLOW_DB_PASSWORD}@postgres:5432/mlflow"
+      --artifacts-destination s3://mlflow
+      --serve-artifacts
+      --allowed-hosts "mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"'
+    ports:
+      - "127.0.0.1:5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+
+  # ---------------------------------------------------------------- full
+
+  prefect-server:
+    image: prefecthq/prefect:3.9.0-python3.14
+    profiles: [full]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:${PREFECT_DB_PASSWORD:?set in .env}@postgres:5432/prefect
+      PREFECT_UI_API_URL: http://localhost:4200/api
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:4200:4200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+
+  label-studio:
+    image: heartexlabs/label-studio:1.23.2
+    profiles: [full]
+    environment:
+      DJANGO_DB: default
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: labelstudio
+      POSTGRE_PASSWORD: ${LABELSTUDIO_DB_PASSWORD:?set in .env}
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      LABEL_STUDIO_HOST: http://localhost:8080
+      LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME:?set in .env}
+      LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD:?set in .env}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+    volumes:
+      - labelstudio-data:/label-studio/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      start_period: 60s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+
+  pushgateway:
+    image: prom/pushgateway:v1.11.5
+    profiles: [full]
+    ports:
+      - "127.0.0.1:9091:9091"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: [full]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./compose/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    profiles: [full]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./compose/alertmanager:/etc/alertmanager:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO-", "http://localhost:9093/-/healthy"]
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    profiles: [full]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./compose/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+
+volumes:
+  postgres-data:
+  rustfs-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:
+  labelstudio-data:

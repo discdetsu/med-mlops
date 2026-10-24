@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MLFLOW_DISABLE_AGENT_HINT: "1"
+
+jobs:
+  checks:
+    name: Lint, type check, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make lint
+      - run: make typecheck
+      - run: make test
+
+  integration:
+    name: Integration (core stack)
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --locked
+      - run: make up PROFILE=core
+      - run: make test-integration
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile core logs --no-color
+      - if: always()
+        run: make clean

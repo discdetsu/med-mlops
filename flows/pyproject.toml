@@ -1,0 +1,19 @@
+[project]
+name = "cxr-flows"
+version = "0.1.0"
+description = "Prefect flows: ingest, train, promotion, monitor, labeling export"
+requires-python = ">=3.14"
+dependencies = [
+    "cxr-core[train]",
+    "prefect>=3.9",
+    "mlflow>=3.17",
+    "dvc[s3]>=3.67",
+    "pandera[pandas]>=0.34",
+    "pydantic>=2.14",
+    "onnx>=1.19",
+    "onnxruntime>=1.31",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"

@@ -1,0 +1,52 @@
+{
+  "vhosts": [{ "name": "/" }],
+  "exchanges": [
+    {
+      "name": "model.events",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "dlx",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": { "x-queue-type": "quorum" }
+    }
+  ],
+  "bindings": [
+    {
+      "source": "dlx",
+      "vhost": "/",
+      "destination": "dlq",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "/",
+      "name": "inference-dead-letter",
+      "pattern": "^inference",
+      "apply-to": "queues",
+      "priority": 0,
+      "definition": { "dead-letter-exchange": "dlx" }
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+# Virtual workspace root: no package of its own, only shared tooling config.
+[tool.uv.workspace]
+members = ["packages/cxr_core", "backend", "worker", "flows"]
+
+[tool.uv.sources]
+cxr-core = { workspace = true }
+torch = { index = "pytorch-cpu" }
+
+# CPU-only torch wheels: training runs on CPU and CI must not pull CUDA.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.2",
+    "mypy>=2.4",
+    "pytest>=9.1",
+    "pre-commit>=4",
+    # integration tests against the compose stack
+    "boto3>=1.43",
+    "mlflow>=3.17",
+    "dvc[s3]>=3.67",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cxr_core", "cxr_backend", "cxr_worker", "cxr_flows"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = [
+    "packages/cxr_core/src",
+    "backend/src",
+    "worker/src",
+    "flows/src",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/cxr_core/tests", "tests"]
+addopts = ["--import-mode=importlib", "-m", "not integration"]
+markers = [
+    "integration: needs the core compose stack running (make up)",
+]
