@@ -1,0 +1,219 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>CXR MLOps Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one wide architecture poster in a framed canvas, legend above, four flow notes beneath */
+:root {
+  --bg: #F3F5F8; --surface: #FFFFFF; --fg: #16202A; --muted: #5A6774; --line: #74818E; --frame: #2F6FEB;
+  --data-f: #EFEAFE; --data-s: #6B4FD8; --data-t: #34247F;
+  --train-f: #E6F0FE; --train-s: #2F6FEB; --train-t: #153C85;
+  --serve-f: #E2F5EE; --serve-s: #148A66; --serve-t: #0A4C39;
+  --mon-f: #FDECE5; --mon-s: #D2582A; --mon-t: #74290F;
+  --store-f: #ECEFF3; --store-s: #5F6B78; --store-t: #27313B;
+  --zone: #F7F9FC;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0E1319; --surface: #151C24; --fg: #E5EAF0; --muted: #96A3B0; --line: #8594A3; --frame: #5C8DF0;
+  --data-f: #241D44; --data-s: #A592F6; --data-t: #DDD5FF;
+  --train-f: #12264A; --train-s: #7EA8F7; --train-t: #D7E5FE;
+  --serve-f: #0D3027; --serve-s: #4FC9A0; --serve-t: #CCF2E4;
+  --mon-f: #381B10; --mon-s: #F08B5F; --mon-t: #FDDDCE;
+  --store-f: #1E262F; --store-s: #94A2B0; --store-t: #DEE4EA;
+  --zone: #111820; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0E1319; --surface: #151C24; --fg: #E5EAF0; --muted: #96A3B0; --line: #8594A3; --frame: #5C8DF0;
+  --data-f: #241D44; --data-s: #A592F6; --data-t: #DDD5FF;
+  --train-f: #12264A; --train-s: #7EA8F7; --train-t: #D7E5FE;
+  --serve-f: #0D3027; --serve-s: #4FC9A0; --serve-t: #CCF2E4;
+  --mon-f: #381B10; --mon-s: #F08B5F; --mon-t: #FDDDCE;
+  --store-f: #1E262F; --store-s: #94A2B0; --store-t: #DEE4EA;
+  --zone: #111820; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.6; }
+.wrap { max-width: 1240px; margin: 0 auto; padding-block: 28px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 20px; }
+header { display: grid; gap: 4px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-family: var(--display); font-weight: 600; font-size: clamp(26px, 4.4vw, 40px); line-height: 1.1; margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+.sub { color: var(--muted); margin: 0; max-width: 65ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend i { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid; display: inline-block; }
+.legend i.dot { width: 9px; height: 9px; border-radius: 50%; border: 0; background: var(--fg); }
+.legend code { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+.canvas { overflow-x: auto; background: var(--surface); border-radius: 14px; -webkit-overflow-scrolling: touch; }
+.canvas svg { display: block; width: 100%; min-width: 1080px; height: auto; }
+.hint { font-size: 12px; color: var(--muted); margin: -10px 0 0; }
+@media (min-width: 1100px) { .hint { display: none; } }
+.flows { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+.flow { min-width: 0; padding: 14px 16px; border-top: 3px solid var(--k); background: var(--surface); }
+.flow h2 { font-family: var(--display); font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+.flow p { margin: 0; color: var(--muted); font-size: 14px; }
+.flow code { font-family: var(--mono); font-size: 12.5px; color: var(--fg); }
+svg .frame { fill: none; stroke: var(--frame); stroke-width: 2.5; }
+svg .zone { fill: var(--zone); stroke: var(--train-s); stroke-width: 1.4; stroke-dasharray: 7 6; }
+svg .zl { font-family: var(--mono); font-size: 12px; fill: var(--train-t); letter-spacing: .02em; }
+svg .edge { fill: none; stroke: var(--line); stroke-width: 1.4; }
+svg .edge.dash { stroke-dasharray: 6 5; }
+svg .ahead { fill: var(--line); }
+svg .el { font-family: var(--mono); font-size: 12px; fill: var(--muted); }
+svg .n rect { stroke-width: 1.4; }
+svg .nt { font-family: var(--body); font-weight: 600; font-size: 15px; }
+svg .ns { font-family: var(--mono); font-size: 11.5px; opacity: .85; }
+svg .data rect { fill: var(--data-f); stroke: var(--data-s); } svg .data text { fill: var(--data-t); }
+svg .train rect { fill: var(--train-f); stroke: var(--train-s); } svg .train text { fill: var(--train-t); }
+svg .serve rect { fill: var(--serve-f); stroke: var(--serve-s); } svg .serve text { fill: var(--serve-t); }
+svg .mon rect { fill: var(--mon-f); stroke: var(--mon-s); } svg .mon text { fill: var(--mon-t); }
+svg .store rect { fill: var(--store-f); stroke: var(--store-s); } svg .store text { fill: var(--store-t); }
+svg .user rect { fill: var(--surface); stroke: var(--fg); } svg .user text { fill: var(--fg); }
+svg .core { fill: var(--fg); }
+</style>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Open-source · on-prem · Docker Compose core / full</div>
+    <h1>full-stack-on-prem-cxr-mlops</h1>
+    <p class="sub">Chest X-ray abnormality classification with prediction and CAM heatmap, from versioned data to label-driven retraining. Portfolio project, not a medical device.</p>
+  </header>
+  <div class="legend" aria-label="Legend">
+    <span><i style="background:var(--data-f);border-color:var(--data-s)"></i>Data + annotation</span>
+    <span><i style="background:var(--train-f);border-color:var(--train-s)"></i>Training + registry</span>
+    <span><i style="background:var(--serve-f);border-color:var(--serve-s)"></i>Serving</span>
+    <span><i style="background:var(--mon-f);border-color:var(--mon-s)"></i>Monitoring</span>
+    <span><i style="background:var(--store-f);border-color:var(--store-s)"></i>Storage</span>
+    <span><i class="dot"></i>In the <code>core</code> profile</span>
+    <span>Dashed line: async or orchestrated</span>
+    <span>Both RustFS boxes: one instance, two buckets</span>
+  </div>
+  <div class="canvas">
+    <svg viewBox="0 0 1600 940" role="img" aria-labelledby="t d">
+      <title id="t">CXR MLOps architecture</title>
+      <desc id="d">DVC versions datasets in a RustFS bucket. A new revision with enough new labels triggers a Prefect training flow: validate with a patient-level split, build, train, evaluate on a locked test set, export ONNX, run an end-to-end parity test, build a drift reference from the trained model, and register a challenger with thresholds in MLflow. A promotion gate compares challenger and champion with paired confidence intervals; after approval in Django admin, MLflow moves the champion alias and Django sends the version to workers through RabbitMQ. Workers load that model version from the artifacts bucket. A monitor flow reads predictions and feedback from PostgreSQL plus the champion's reference, pushes scores to Pushgateway and Prometheus, and sends drifted cases and model versus radiologist disagreements to Label Studio. Prometheus also scrapes the API and worker, alerts through Alertmanager, and feeds Grafana.</desc>
+      <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ahead" d="M0 0 L10 5 L0 10 z"/></marker></defs>
+<rect class="frame" x="10" y="10" width="1580" height="920" rx="18"/>
+<rect class="zone" x="340" y="130" width="780" height="290" rx="14"/>
+<text class="zl" x="360" y="156">Prefect training flow · CPU demo profile</text>
+<text class="zl" x="1104" y="156" text-anchor="end">imports cxr_preprocess</text>
+
+<!-- data -->
+<path class="edge" d="M175 118 L175 170" marker-end="url(#ah)"/>
+<path class="edge dash" d="M302 72 L568 72" marker-end="url(#ah)"/>
+<path class="edge" d="M302 204 L354 204" marker-end="url(#ah)"/>
+<path class="edge" d="M175 478 L175 238" marker-end="url(#ah)"/>
+<path class="edge dash" d="M358 832 L175 832 L175 546" marker-end="url(#ah)"/>
+<!-- training flow -->
+<path class="edge dash" d="M720 98 L720 128" marker-end="url(#ah)"/>
+<path class="edge" d="M528 204 L546 204" marker-end="url(#ah)"/>
+<path class="edge" d="M720 204 L738 204" marker-end="url(#ah)"/>
+<path class="edge" d="M912 204 L930 204" marker-end="url(#ah)"/>
+<path class="edge" d="M1018 236 L1018 314" marker-end="url(#ah)"/>
+<path class="edge" d="M932 348 L914 348" marker-end="url(#ah)"/>
+<path class="edge" d="M740 348 L722 348" marker-end="url(#ah)"/>
+<path class="edge" d="M548 348 L530 348" marker-end="url(#ah)"/>
+<path class="edge" d="M442 380 L442 478" marker-end="url(#ah)"/>
+<!-- registry + promotion -->
+<path class="edge" d="M622 500 L758 500" marker-end="url(#ah)"/>
+<path class="edge" d="M758 526 L622 526" marker-end="url(#ah)"/>
+<path class="edge" d="M420 544 L420 618" marker-end="url(#ah)"/>
+<path class="edge" d="M560 544 L560 584 L820 584 L820 618" marker-end="url(#ah)"/>
+<path class="edge" d="M1082 512 L1160 512 L1160 256 L1298 256" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<!-- serving -->
+<path class="edge" d="M1262 68 L1298 68" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<path class="edge" d="M1425 98 L1425 134" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<path class="edge" d="M1425 194 L1425 230" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<path class="edge" d="M1425 298 L1425 338" marker-end="url(#ah)"/>
+<path class="edge" d="M1425 398 L1425 438" marker-end="url(#ah)"/>
+<path class="edge" d="M1298 472 L1278 472 L1278 284 L1298 284" marker-end="url(#ah)"/>
+<path class="edge" d="M1425 506 L1425 652 L1082 652" marker-end="url(#ah)"/>
+<!-- storage + monitoring (line hops mark crossings) -->
+<path class="edge" d="M1552 264 L1572 264 L1572 730 L1506 730 A6 6 0 0 0 1494 730 L866 730 A6 6 0 0 0 854 730 L470 730 L470 686" marker-end="url(#ah)"/>
+<path class="edge" d="M410 686 L410 798" marker-end="url(#ah)"/>
+<path class="edge" d="M860 686 L860 774 L600 774 L600 798" marker-end="url(#ah)"/>
+<path class="edge dash" d="M1500 506 L1500 774 L1120 774 L1120 798" marker-end="url(#ah)"/>
+<path class="edge" d="M642 832 L698 832" marker-end="url(#ah)"/>
+<path class="edge" d="M902 832 L958 832" marker-end="url(#ah)"/>
+<path class="edge" d="M1162 832 L1208 832" marker-end="url(#ah)"/>
+<path class="edge dash" d="M1060 866 L1060 900 L1495 900 L1495 866" marker-end="url(#ah)"/>
+
+<!-- edge labels -->
+<text class="el" x="183" y="148">version</text>
+<text class="el" x="435" y="48" text-anchor="middle">should_retrain():</text>
+<text class="el" x="435" y="63" text-anchor="middle">new rev + ≥N labels</text>
+<text class="el" x="183" y="362">new labels</text>
+<text class="el" x="183" y="700">drifted +</text>
+<text class="el" x="183" y="716">disagreements</text>
+<text class="el" x="728" y="118">orchestrate</text>
+<text class="el" x="690" y="492" text-anchor="middle">challenger</text>
+<text class="el" x="690" y="542" text-anchor="middle">set @champion</text>
+<text class="el" x="428" y="590">metadata</text>
+<text class="el" x="690" y="578" text-anchor="middle">artifacts</text>
+<text class="el" x="1168" y="330">report,</text>
+<text class="el" x="1168" y="346">approve</text>
+<text class="el" x="1433" y="322">jobs, vN event</text>
+<text class="el" x="1270" y="404" text-anchor="end">results,</text>
+<text class="el" x="1270" y="420" text-anchor="end">vN on start</text>
+<text class="el" x="1250" y="644" text-anchor="middle">load model vN</text>
+<text class="el" x="1180" y="722" text-anchor="middle">jobs, predictions + model_version, feedback</text>
+<text class="el" x="418" y="766">predictions + feedback</text>
+<text class="el" x="730" y="766" text-anchor="middle">reference @champion</text>
+<text class="el" x="1310" y="766" text-anchor="middle">scrape /metrics</text>
+<text class="el" x="1280" y="894" text-anchor="middle">query</text>
+
+<!-- nodes -->
+<g class="n data"><rect x="50" y="52" width="250" height="64" rx="8"/><text class="nt" x="175" y="76" text-anchor="middle" dominant-baseline="central">DVC</text><text class="ns" x="175" y="95" text-anchor="middle" dominant-baseline="central">train/ + locked_test/ paths</text></g>
+<g class="n data"><rect x="50" y="172" width="250" height="64" rx="8"/><text class="nt" x="175" y="196" text-anchor="middle" dominant-baseline="central">RustFS · datasets bucket</text><text class="ns" x="175" y="215" text-anchor="middle" dominant-baseline="central">DICOM, images, labels</text></g>
+<g class="n data"><rect x="50" y="480" width="250" height="64" rx="8"/><text class="nt" x="175" y="504" text-anchor="middle" dominant-baseline="central">Label Studio</text><text class="ns" x="175" y="523" text-anchor="middle" dominant-baseline="central">Model vs radiologist</text></g>
+
+<g class="n train"><rect x="570" y="40" width="300" height="56" rx="8"/><text class="nt" x="720" y="60" text-anchor="middle" dominant-baseline="central">Prefect</text><text class="ns" x="720" y="79" text-anchor="middle" dominant-baseline="central">Schedules, retries, triggers</text></g>
+<g class="n train"><rect x="356" y="172" width="172" height="64" rx="8"/><text class="nt" x="442" y="196" text-anchor="middle" dominant-baseline="central">Validate</text><text class="ns" x="442" y="215" text-anchor="middle" dominant-baseline="central">Pandera, patient split</text></g>
+<g class="n train"><rect x="548" y="172" width="172" height="64" rx="8"/><text class="nt" x="634" y="196" text-anchor="middle" dominant-baseline="central">Build dataset</text><text class="ns" x="634" y="215" text-anchor="middle" dominant-baseline="central">Pin DVC rev</text></g>
+<g class="n train"><rect x="740" y="172" width="172" height="64" rx="8"/><text class="nt" x="826" y="196" text-anchor="middle" dominant-baseline="central">Train</text><text class="ns" x="826" y="215" text-anchor="middle" dominant-baseline="central">timm, GAP+linear head</text></g>
+<g class="n train"><rect x="932" y="172" width="172" height="64" rx="8"/><text class="nt" x="1018" y="196" text-anchor="middle" dominant-baseline="central">Evaluate</text><text class="ns" x="1018" y="215" text-anchor="middle" dominant-baseline="central">Locked + recent slice</text></g>
+<g class="n train"><rect x="356" y="316" width="172" height="64" rx="8"/><text class="nt" x="442" y="340" text-anchor="middle" dominant-baseline="central">Register</text><text class="ns" x="442" y="359" text-anchor="middle" dominant-baseline="central">@challenger, thresholds</text></g>
+<g class="n train"><rect x="548" y="316" width="172" height="64" rx="8"/><text class="nt" x="634" y="340" text-anchor="middle" dominant-baseline="central">Build reference</text><text class="ns" x="634" y="359" text-anchor="middle" dominant-baseline="central">Embeddings + preds</text></g>
+<g class="n train"><rect x="740" y="316" width="172" height="64" rx="8"/><text class="nt" x="826" y="340" text-anchor="middle" dominant-baseline="central">E2E parity test</text><text class="ns" x="826" y="359" text-anchor="middle" dominant-baseline="central">DICOM → probs + CAM</text></g>
+<g class="n train"><rect x="932" y="316" width="172" height="64" rx="8"/><text class="nt" x="1018" y="340" text-anchor="middle" dominant-baseline="central">Export ONNX</text><text class="ns" x="1018" y="359" text-anchor="middle" dominant-baseline="central">Logits + features</text></g>
+<g class="n train"><rect x="360" y="480" width="260" height="64" rx="8"/><text class="nt" x="490" y="504" text-anchor="middle" dominant-baseline="central">MLflow</text><text class="ns" x="490" y="523" text-anchor="middle" dominant-baseline="central">Tracking + registry aliases</text></g>
+<g class="n train"><rect x="760" y="480" width="320" height="64" rx="8"/><text class="nt" x="920" y="504" text-anchor="middle" dominant-baseline="central">Promotion gate</text><text class="ns" x="920" y="523" text-anchor="middle" dominant-baseline="central">Paired CI vs champion + approve</text></g>
+
+<g class="n store"><rect x="360" y="620" width="260" height="64" rx="8"/><text class="nt" x="490" y="644" text-anchor="middle" dominant-baseline="central">PostgreSQL</text><text class="ns" x="490" y="663" text-anchor="middle" dominant-baseline="central">app, mlflow, prefect, labelstudio</text></g>
+<g class="n store"><rect x="740" y="620" width="340" height="64" rx="8"/><text class="nt" x="910" y="644" text-anchor="middle" dominant-baseline="central">RustFS · artifacts bucket</text><text class="ns" x="910" y="663" text-anchor="middle" dominant-baseline="central">Models, ONNX, refs, heatmaps</text></g>
+
+<g class="n user"><rect x="1130" y="40" width="130" height="56" rx="8"/><text class="nt" x="1195" y="60" text-anchor="middle" dominant-baseline="central">User</text><text class="ns" x="1195" y="79" text-anchor="middle" dominant-baseline="central">Radiologist</text></g>
+<g class="n serve"><rect x="1300" y="40" width="250" height="56" rx="8"/><text class="nt" x="1425" y="60" text-anchor="middle" dominant-baseline="central">Web UI</text><text class="ns" x="1425" y="79" text-anchor="middle" dominant-baseline="central">Svelte + Vite + Cornerstone3D</text></g>
+<g class="n serve"><rect x="1300" y="136" width="250" height="56" rx="8"/><text class="nt" x="1425" y="156" text-anchor="middle" dominant-baseline="central">Nginx</text><text class="ns" x="1425" y="175" text-anchor="middle" dominant-baseline="central">Gateway, rate limit</text></g>
+<g class="n serve"><rect x="1300" y="232" width="250" height="64" rx="8"/><text class="nt" x="1425" y="256" text-anchor="middle" dominant-baseline="central">Django + Ninja</text><text class="ns" x="1425" y="275" text-anchor="middle" dominant-baseline="central">API, ORM, admin approval</text></g>
+<g class="n serve"><rect x="1300" y="340" width="250" height="56" rx="8"/><text class="nt" x="1425" y="360" text-anchor="middle" dominant-baseline="central">RabbitMQ</text><text class="ns" x="1425" y="379" text-anchor="middle" dominant-baseline="central">Jobs, DLQ, model events</text></g>
+<g class="n serve"><rect x="1300" y="440" width="250" height="64" rx="8"/><text class="nt" x="1425" y="464" text-anchor="middle" dominant-baseline="central">Celery worker</text><text class="ns" x="1425" y="483" text-anchor="middle" dominant-baseline="central">ONNX RT, CAM, cxr_preprocess</text></g>
+
+<g class="n mon"><rect x="360" y="800" width="280" height="64" rx="8"/><text class="nt" x="500" y="824" text-anchor="middle" dominant-baseline="central">Monitor flow</text><text class="ns" x="500" y="843" text-anchor="middle" dominant-baseline="central">Evidently drift, delayed AUROC</text></g>
+<g class="n mon"><rect x="700" y="800" width="200" height="64" rx="8"/><text class="nt" x="800" y="824" text-anchor="middle" dominant-baseline="central">Pushgateway</text><text class="ns" x="800" y="843" text-anchor="middle" dominant-baseline="central">Scores + last_success</text></g>
+<g class="n mon"><rect x="960" y="800" width="200" height="64" rx="8"/><text class="nt" x="1060" y="824" text-anchor="middle" dominant-baseline="central">Prometheus</text><text class="ns" x="1060" y="843" text-anchor="middle" dominant-baseline="central">Rules: drift, stale, DLQ</text></g>
+<g class="n mon"><rect x="1210" y="800" width="180" height="64" rx="8"/><text class="nt" x="1300" y="824" text-anchor="middle" dominant-baseline="central">Alertmanager</text><text class="ns" x="1300" y="843" text-anchor="middle" dominant-baseline="central">Discord / Slack</text></g>
+<g class="n mon"><rect x="1430" y="800" width="130" height="64" rx="8"/><text class="nt" x="1495" y="824" text-anchor="middle" dominant-baseline="central">Grafana</text><text class="ns" x="1495" y="843" text-anchor="middle" dominant-baseline="central">Dashboards</text></g>
+
+<!-- core profile markers -->
+<circle class="core" cx="288" cy="184" r="4.5"/>
+<circle class="core" cx="608" cy="492" r="4.5"/>
+<circle class="core" cx="608" cy="632" r="4.5"/>
+<circle class="core" cx="1068" cy="632" r="4.5"/>
+<circle class="core" cx="1538" cy="52" r="4.5"/>
+<circle class="core" cx="1538" cy="148" r="4.5"/>
+<circle class="core" cx="1538" cy="244" r="4.5"/>
+<circle class="core" cx="1538" cy="352" r="4.5"/>
+<circle class="core" cx="1538" cy="452" r="4.5"/>
+    </svg>
+  </div>
+  <p class="hint">Scroll sideways to see the full diagram.</p>
+  <section class="flows">
+    <div class="flow" style="--k:var(--serve-s)"><h2>Request path</h2><p>Upload goes through Nginx to Django, which creates an <code>inference_job</code> and queues it in RabbitMQ. The worker runs <code>cxr_preprocess</code>, ONNX Runtime and CAM, then posts probabilities and the heatmap back through Django's internal API. Each prediction row stores <code>model_version</code>.</p></div>
+    <div class="flow" style="--k:var(--train-s)"><h2>Training and promotion</h2><p>A new DVC revision with at least N new labels starts a run; drift alone never does. The run registers <code>@challenger</code> with class thresholds and its drift reference. The gate compares it with <code>@champion</code> on the locked, patient-split test set using paired bootstrap CIs. After approval in Django admin, the alias moves and Django fans out the version; workers also ask Django at startup.</p></div>
+    <div class="flow" style="--k:var(--mon-s)"><h2>Monitoring loop</h2><p>The monitor flow reads predictions and radiologist feedback per model version, compares embeddings and outputs with the champion's reference, and computes delayed AUROC from feedback. Drifted cases and model vs radiologist disagreements go to Label Studio. Pushgateway carries <code>last_success</code>, so a stalled flow raises an alert instead of showing old scores.</p></div>
+    <div class="flow" style="--k:var(--store-s)"><h2>Running the demo</h2><p><code>docker compose --profile core up</code> starts the dot-marked services and seeds a starter <code>@champion</code>, so upload to heatmap works without training. <code>--profile full</code> adds Prefect, Label Studio and monitoring. CAM assumes a GAP + linear head, and the parity test runs a real DICOM end to end.</p></div>
+  </section>
+</div>
+
+</body></html>
