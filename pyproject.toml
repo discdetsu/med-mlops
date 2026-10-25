@@ -22,6 +22,7 @@ dev = [
     "boto3>=1.43",
     "mlflow>=3.17",
     "dvc[s3]>=3.67",
+    "kombu>=5.6",
 ]
 
 [tool.ruff]

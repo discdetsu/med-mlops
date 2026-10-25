@@ -9,6 +9,9 @@ deadline=$(( $(date +%s) + ${2:-300} ))
 
 while :; do
     status=$(docker compose --profile "$profile" ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}')
+    if [ -z "$status" ]; then
+        echo "no containers for profile '$profile'" >&2; exit 1
+    fi
     failed=$(echo "$status" | awk -F'|' '($2 == "exited" && ($4 != 0 || $1 !~ /-init$/)) || $3 == "unhealthy"')
     pending=$(echo "$status" | awk -F'|' '!(($2 == "running" && $3 == "healthy") || ($2 == "exited" && $4 == 0 && $1 ~ /-init$/))')
 

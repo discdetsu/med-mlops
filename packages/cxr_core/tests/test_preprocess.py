@@ -139,6 +139,45 @@ class TestDicom:
         with pytest.raises(ValueError, match="PhotometricInterpretation"):
             load_image(path)
 
+    @pytest.mark.parametrize("function", ["SIGMOID", "LINEAR_EXACT"])
+    def test_rejects_non_linear_voi_function(
+        self, tmp_path: Path, gradient: npt.NDArray[np.uint16], function: str
+    ) -> None:
+        path = write_dicom(
+            tmp_path / "voi.dcm",
+            gradient,
+            "MONOCHROME2",
+            WindowCenter=500,
+            WindowWidth=400,
+            VOILUTFunction=function,
+        )
+        with pytest.raises(ValueError, match="VOILUTFunction"):
+            load_image(path)
+
+    def test_explicit_linear_voi_function_is_windowed(
+        self, tmp_path: Path, gradient: npt.NDArray[np.uint16]
+    ) -> None:
+        path = write_dicom(
+            tmp_path / "voi.dcm",
+            gradient,
+            "MONOCHROME2",
+            WindowCenter=500,
+            WindowWidth=400,
+            VOILUTFunction="LINEAR",
+        )
+        expected = apply_window(gradient.astype(np.float32), 500, 400)
+        np.testing.assert_allclose(load_image(path), expected, atol=1e-6)
+
+    def test_rejects_voi_lut_sequence(
+        self, tmp_path: Path, gradient: npt.NDArray[np.uint16]
+    ) -> None:
+        item = Dataset()
+        item.LUTDescriptor = [4, 0, 16]
+        item.LUTData = np.array([0, 100, 200, 300], dtype="<u2").tobytes()
+        path = write_dicom(tmp_path / "lut.dcm", gradient, "MONOCHROME2", VOILUTSequence=[item])
+        with pytest.raises(ValueError, match="VOI LUT Sequence"):
+            load_image(path)
+
 
 class TestPng:
     def test_8bit(self, tmp_path: Path) -> None:

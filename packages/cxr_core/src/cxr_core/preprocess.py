@@ -51,11 +51,18 @@ def load_dicom(path: Path) -> FloatArray:
     """Modality LUT → linear VOI window (or min-max without one) → MONOCHROME1 inversion.
 
     Uncompressed transfer syntaxes only; compressed DICOM needs pylibjpeg or GDCM.
+    A VOI LUT Sequence or a non-LINEAR VOI LUT Function is rejected rather than silently
+    replaced by the linear window.
     """
     ds = pydicom.dcmread(path)
     photometric = ds.get("PhotometricInterpretation", "MONOCHROME2")
     if photometric not in ("MONOCHROME1", "MONOCHROME2"):
         raise ValueError(f"{path}: unsupported PhotometricInterpretation {photometric!r}")
+    if "VOILUTSequence" in ds:
+        raise ValueError(f"{path}: VOI LUT Sequence is not supported")
+    voi_function = ds.get("VOILUTFunction", "LINEAR")
+    if voi_function != "LINEAR":
+        raise ValueError(f"{path}: unsupported VOILUTFunction {voi_function!r}")
 
     values = np.asarray(apply_modality_lut(ds.pixel_array, ds), dtype=np.float32)
     if values.ndim != 2:

@@ -55,16 +55,16 @@ Changes from v1: data and training are merged into one phase, backend and fronte
 
 ## Phase 0: Repo foundation
 
-Get a repo where `make up` starts all `core` infrastructure with health checks and CI runs lint and tests, before the first line of ML code. Layout and tooling follow the v1 plan.
+Get a repo where `make up` starts all `core` infrastructure with health checks and CI runs lint and tests, before the first line of ML code. The layout below replaces v1's `src/cxr/` + `services/` + `infra/` layout; the tooling (uv, ruff, mypy, pytest, pre-commit) carries over.
 
 - [x] Monorepo: `compose/`, `packages/cxr_core/`, `backend/`, `worker/`, `flows/`, `frontend/`, `data/`, `scripts/`, `docs/`
-- [x] `docker-compose.yml` with `core` and `full` profiles (v1 had separate `monitoring` and `labeling` profiles), a healthcheck on every service, and `depends_on: condition: service_healthy`
+- [x] `docker-compose.yml` with `core` and `full` profiles (v1 had separate `monitoring` and `labeling` profiles), a healthcheck on every long-running service (one-shot `*-init` jobs use `service_completed_successfully` instead, see ADR 0002), and `depends_on: condition: service_healthy`
 - [x] Postgres init creates 4 databases (app, mlflow, prefect, labelstudio) with a separate user per database
 - [x] RustFS init job creates the `datasets`, `artifacts`, `inference`, and `mlflow` buckets plus a lifecycle rule for `inference/raw/`; every client reads the S3 endpoint from one set of env vars so the backend can be swapped
 - [x] RabbitMQ with the management plugin, a `model.events` fanout exchange, and a DLQ
 - [x] MLflow: Postgres backend store, RustFS artifact store
-- [x] `cxr_core` skeleton: `preprocess` (numpy only, handles `MONOCHROME1`, windowing, `preprocess_version`), `cam`, `metrics`; `[train]` extra = torch + timm
-- [x] `Makefile`: `up`, `down`, `seed`, `train`, `demo`, `test`
+- [x] `cxr_core` skeleton: `preprocess` (no torch: numpy for the math, pydicom + Pillow for decoding and resampling; handles `MONOCHROME1`, linear windowing, rejecting VOI LUT sequences and non-LINEAR VOI functions, `preprocess_version`), `cam`, `metrics`; `[train]` extra = torch + timm
+- [x] `Makefile`: `up`, `down`, `test`; `seed`, `train`, `demo` are stubs that exit 1 until Phases 1-2
 - [x] uv workspace, ruff, mypy, pytest, pre-commit
 - [x] GitHub Actions: lint, type check, unit tests
 - [x] RustFS integration tests: put/get, multipart, presigned URL, MLflow artifact logging, DVC push/pull

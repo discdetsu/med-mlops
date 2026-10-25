@@ -205,6 +205,8 @@ services:
     depends_on:
       pushgateway:
         condition: service_healthy
+      alertmanager:
+        condition: service_healthy
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]

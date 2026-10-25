@@ -24,6 +24,7 @@ members = [
 dev = [
     { name = "boto3", specifier = ">=1.43" },
     { name = "dvc", extras = ["s3"], specifier = ">=3.67" },
+    { name = "kombu", specifier = ">=5.6" },
     { name = "mlflow", specifier = ">=3.17" },
     { name = "mypy", specifier = ">=2.4" },
     { name = "pre-commit", specifier = ">=4" },
