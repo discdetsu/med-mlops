@@ -55,20 +55,20 @@ Changes from v1: data and training are merged into one phase, backend and fronte
 
 ## Phase 0: Repo foundation
 
-Get a repo where `make up` starts all `core` infrastructure with health checks and CI runs lint and tests, before the first line of ML code. Layout and tooling follow the v1 plan.
+Get a repo where `make up` starts all `core` infrastructure with health checks and CI runs lint and tests, before the first line of ML code. The layout below replaces v1's `src/cxr/` + `services/` + `infra/` layout; the tooling (uv, ruff, mypy, pytest, pre-commit) carries over.
 
-- [ ] Monorepo: `compose/`, `packages/cxr_core/`, `backend/`, `worker/`, `flows/`, `frontend/`, `data/`, `scripts/`, `docs/`
-- [ ] `docker-compose.yml` with `core` and `full` profiles (v1 had separate `monitoring` and `labeling` profiles), a healthcheck on every service, and `depends_on: condition: service_healthy`
-- [ ] Postgres init creates 4 databases (app, mlflow, prefect, labelstudio) with a separate user per database
-- [ ] RustFS init job creates the `datasets`, `artifacts`, `inference`, and `mlflow` buckets plus a lifecycle rule for `inference/raw/`; every client reads the S3 endpoint from one set of env vars so the backend can be swapped
-- [ ] RabbitMQ with the management plugin, a `model.events` fanout exchange, and a DLQ
-- [ ] MLflow: Postgres backend store, RustFS artifact store
-- [ ] `cxr_core` skeleton: `preprocess` (numpy only, handles `MONOCHROME1`, windowing, `preprocess_version`), `cam`, `metrics`; `[train]` extra = torch + timm
-- [ ] `Makefile`: `up`, `down`, `seed`, `train`, `demo`, `test`
-- [ ] uv workspace, ruff, mypy, pytest, pre-commit
-- [ ] GitHub Actions: lint, type check, unit tests
-- [ ] RustFS integration tests: put/get, multipart, presigned URL, MLflow artifact logging, DVC push/pull
-- [ ] Create `docs/adr/` and write each ADR as soon as the decision is made, starting with RustFS and the core/full profiles
+- [x] Monorepo: `compose/`, `packages/cxr_core/`, `backend/`, `worker/`, `flows/`, `frontend/`, `data/`, `scripts/`, `docs/`
+- [x] `docker-compose.yml` with `core` and `full` profiles (v1 had separate `monitoring` and `labeling` profiles), a healthcheck on every long-running service (one-shot `*-init` jobs use `service_completed_successfully` instead, see ADR 0002), and `depends_on: condition: service_healthy`
+- [x] Postgres init creates 4 databases (app, mlflow, prefect, labelstudio) with a separate user per database
+- [x] RustFS init job creates the `datasets`, `artifacts`, `inference`, and `mlflow` buckets plus a lifecycle rule for `inference/raw/`; every client reads the S3 endpoint from one set of env vars so the backend can be swapped
+- [x] RabbitMQ with the management plugin, a `model.events` fanout exchange, and a DLQ
+- [x] MLflow: Postgres backend store, RustFS artifact store
+- [x] `cxr_core` skeleton: `preprocess` (no torch: numpy for the math, pydicom + Pillow for decoding and resampling; handles `MONOCHROME1`, linear windowing, rejecting VOI LUT sequences and non-LINEAR VOI functions, `preprocess_version`), `cam`, `metrics`; `[train]` extra = torch + timm
+- [x] `Makefile`: `up`, `down`, `test`; `seed`, `train`, `demo` are stubs that exit 1 until Phases 1-2
+- [x] uv workspace, ruff, mypy, pytest, pre-commit
+- [x] GitHub Actions: lint, type check, unit tests
+- [x] RustFS integration tests: put/get, multipart, presigned URL, MLflow artifact logging, DVC push/pull
+- [x] Create `docs/adr/` and write each ADR as soon as the decision is made, starting with RustFS and the core/full profiles
 
 **Done when** `make up` brings every `core` service to healthy, CI passes, and the RustFS integration tests pass.
 
@@ -242,5 +242,5 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 - [ ] N for `should_retrain()` and the gate margin
 - [ ] Which 5 to 6 classes to use
 - [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
-- [ ] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name
+- [x] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name. Decided: `cxr_core` (diagram updated)
 - [ ] Internal API auth (shared token or a separate network)

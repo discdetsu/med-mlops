@@ -96,7 +96,7 @@ svg .core { fill: var(--fg); }
 <rect class="frame" x="10" y="10" width="1580" height="920" rx="18"/>
 <rect class="zone" x="340" y="130" width="780" height="290" rx="14"/>
 <text class="zl" x="360" y="156">Prefect training flow · CPU demo profile</text>
-<text class="zl" x="1104" y="156" text-anchor="end">imports cxr_preprocess</text>
+<text class="zl" x="1104" y="156" text-anchor="end">imports cxr_core</text>
 
 <!-- data -->
 <path class="edge" d="M175 118 L175 170" marker-end="url(#ah)"/>
@@ -187,7 +187,7 @@ svg .core { fill: var(--fg); }
 <g class="n serve"><rect x="1300" y="136" width="250" height="56" rx="8"/><text class="nt" x="1425" y="156" text-anchor="middle" dominant-baseline="central">Nginx</text><text class="ns" x="1425" y="175" text-anchor="middle" dominant-baseline="central">Gateway, rate limit</text></g>
 <g class="n serve"><rect x="1300" y="232" width="250" height="64" rx="8"/><text class="nt" x="1425" y="256" text-anchor="middle" dominant-baseline="central">Django + Ninja</text><text class="ns" x="1425" y="275" text-anchor="middle" dominant-baseline="central">API, ORM, admin approval</text></g>
 <g class="n serve"><rect x="1300" y="340" width="250" height="56" rx="8"/><text class="nt" x="1425" y="360" text-anchor="middle" dominant-baseline="central">RabbitMQ</text><text class="ns" x="1425" y="379" text-anchor="middle" dominant-baseline="central">Jobs, DLQ, model events</text></g>
-<g class="n serve"><rect x="1300" y="440" width="250" height="64" rx="8"/><text class="nt" x="1425" y="464" text-anchor="middle" dominant-baseline="central">Celery worker</text><text class="ns" x="1425" y="483" text-anchor="middle" dominant-baseline="central">ONNX RT, CAM, cxr_preprocess</text></g>
+<g class="n serve"><rect x="1300" y="440" width="250" height="64" rx="8"/><text class="nt" x="1425" y="464" text-anchor="middle" dominant-baseline="central">Celery worker</text><text class="ns" x="1425" y="483" text-anchor="middle" dominant-baseline="central">ONNX RT, CAM, cxr_core</text></g>
 
 <g class="n mon"><rect x="360" y="800" width="280" height="64" rx="8"/><text class="nt" x="500" y="824" text-anchor="middle" dominant-baseline="central">Monitor flow</text><text class="ns" x="500" y="843" text-anchor="middle" dominant-baseline="central">Evidently drift, delayed AUROC</text></g>
 <g class="n mon"><rect x="700" y="800" width="200" height="64" rx="8"/><text class="nt" x="800" y="824" text-anchor="middle" dominant-baseline="central">Pushgateway</text><text class="ns" x="800" y="843" text-anchor="middle" dominant-baseline="central">Scores + last_success</text></g>
@@ -209,7 +209,7 @@ svg .core { fill: var(--fg); }
   </div>
   <p class="hint">Scroll sideways to see the full diagram.</p>
   <section class="flows">
-    <div class="flow" style="--k:var(--serve-s)"><h2>Request path</h2><p>Upload goes through Nginx to Django, which creates an <code>inference_job</code> and queues it in RabbitMQ. The worker runs <code>cxr_preprocess</code>, ONNX Runtime and CAM, then posts probabilities and the heatmap back through Django's internal API. Each prediction row stores <code>model_version</code>.</p></div>
+    <div class="flow" style="--k:var(--serve-s)"><h2>Request path</h2><p>Upload goes through Nginx to Django, which creates an <code>inference_job</code> and queues it in RabbitMQ. The worker runs <code>cxr_core.preprocess</code>, ONNX Runtime and CAM, then posts probabilities and the heatmap back through Django's internal API. Each prediction row stores <code>model_version</code>.</p></div>
     <div class="flow" style="--k:var(--train-s)"><h2>Training and promotion</h2><p>A new DVC revision with at least N new labels starts a run; drift alone never does. The run registers <code>@challenger</code> with class thresholds and its drift reference. The gate compares it with <code>@champion</code> on the locked, patient-split test set using paired bootstrap CIs. After approval in Django admin, the alias moves and Django fans out the version; workers also ask Django at startup.</p></div>
     <div class="flow" style="--k:var(--mon-s)"><h2>Monitoring loop</h2><p>The monitor flow reads predictions and radiologist feedback per model version, compares embeddings and outputs with the champion's reference, and computes delayed AUROC from feedback. Drifted cases and model vs radiologist disagreements go to Label Studio. Pushgateway carries <code>last_success</code>, so a stalled flow raises an alert instead of showing old scores.</p></div>
     <div class="flow" style="--k:var(--store-s)"><h2>Running the demo</h2><p><code>docker compose --profile core up</code> starts the dot-marked services and seeds a starter <code>@champion</code>, so upload to heatmap works without training. <code>--profile full</code> adds Prefect, Label Studio and monitoring. CAM assumes a GAP + linear head, and the parity test runs a real DICOM end to end.</p></div>

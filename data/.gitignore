@@ -1,0 +1,6 @@
+# Images and tables live in DVC (s3://datasets/dvc), never in git.
+# `dvc add` writes the .dvc pointer files that do get committed.
+/*
+!/.gitignore
+!/README.md
+!/*.dvc

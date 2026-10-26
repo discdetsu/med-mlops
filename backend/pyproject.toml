@@ -1,0 +1,17 @@
+[project]
+name = "cxr-backend"
+version = "0.1.0"
+description = "Django + Ninja API: jobs, feedback, registry/promotion, monitoring"
+requires-python = ">=3.14"
+dependencies = [
+    "django>=6.1",
+    "django-ninja>=1.7",
+    "psycopg[binary]>=3.3",
+    "celery>=5.6",
+    "boto3>=1.43",
+    "mlflow-skinny>=3.17",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"

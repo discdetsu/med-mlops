@@ -1,0 +1,16 @@
+[project]
+name = "cxr-worker"
+version = "0.1.0"
+description = "Celery inference worker: cxr_core.preprocess → ONNX Runtime → CAM. No Django, no torch."
+requires-python = ">=3.14"
+dependencies = [
+    "cxr-core",
+    "celery>=5.6",
+    "onnxruntime>=1.31",
+    "boto3>=1.43",
+    "httpx>=0.28",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
