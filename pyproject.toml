@@ -5,6 +5,8 @@ members = ["packages/cxr_core", "backend", "worker", "flows"]
 [tool.uv.sources]
 cxr-core = { workspace = true }
 torch = { index = "pytorch-cpu" }
+# timm pulls torchvision; a PyPI build doesn't match the CPU torch ABI (torchvision::nms errors).
+torchvision = { index = "pytorch-cpu" }
 
 # CPU-only torch wheels: training runs on CPU and CI must not pull CUDA.
 [[tool.uv.index]]
