@@ -9,4 +9,4 @@ lr: 3.0e-4
 weight_decay: 1.0e-4
 drop_rate: 0.2
 augment: true
-max_train_images: null  # cap for quick iterations, e.g. 500
+max_train_images: 4000  # random sample of the train split; val and test_locked stay whole

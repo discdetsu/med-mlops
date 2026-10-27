@@ -100,13 +100,13 @@ def build_splits(paths: Paths, data: PinnedData, cfg: TrainConfig) -> Splits:
     cache = paths.cache
     nih_md5, locked_md5 = data.md5s["data/nih"], data.md5s["data/test_locked"]
     nih = data.nih
-    train = load_split(
-        nih[nih["split"] == "train"], paths.nih, nih_md5, "train", cfg.image_size, cache
-    )
-    if cfg.max_train_images is not None and cfg.max_train_images < len(train):
-        rng = np.random.default_rng(cfg.seed)
-        keep = np.sort(rng.choice(len(train), cfg.max_train_images, replace=False))
-        train = Split(train.meta.iloc[keep].reset_index(drop=True), train.x[keep], train.y[keep])
+    train_meta = nih[nih["split"] == "train"]
+    if cfg.max_train_images is not None and cfg.max_train_images < len(train_meta):
+        # Sample before preprocessing, so the cache only holds the images we train on.
+        train_meta = train_meta.sort_values("image_id").sample(
+            n=cfg.max_train_images, random_state=cfg.seed
+        )
+    train = load_split(train_meta, paths.nih, nih_md5, "train", cfg.image_size, cache)
     val = load_split(nih[nih["split"] == "val"], paths.nih, nih_md5, "val", cfg.image_size, cache)
     test = load_split(
         data.test_locked, paths.test_locked, locked_md5, "test_locked", cfg.image_size, cache
