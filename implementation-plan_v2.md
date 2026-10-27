@@ -1,6 +1,6 @@
 # CXR MLOps Implementation Plan v2
 
-Last updated: 2026-10-24 · No deadlines: phases are ordered by dependency.
+Last updated: 2026-10-27 · No deadlines: phases are ordered by dependency.
 
 ## Goal and definition of done
 
@@ -78,27 +78,27 @@ Get a repo where `make up` starts all `core` infrastructure with health checks a
 
 **Data**
 
-- [ ] `scripts/download_nih.py` selects a subset of NIH ChestX-ray14; no images are committed to the repo
-- [ ] Pick 5 to 6 classes with enough examples and record the reasoning in the model card
-- [ ] Canonical schema from v1 (`image_id`, `patient_id`, `view_position`, `split`, label columns, `label_source`)
-- [ ] Split by patient; `test_locked/` is a separate, frozen DVC path, and new labels from Label Studio can only go into `curated/`
-- [ ] Small golden set with both PNG and DICOM, including at least one `MONOCHROME1` file to test inversion
-- [ ] Pandera schema: allowed values, image size, no patient shared across splits or with `test_locked/`
-- [ ] Prefect `ingest` flow: download → validate → `dvc add` + `dvc push` → load metadata into Postgres → record in `dataset_versions`
+- [x] `scripts/download_nih.py` selects a subset of NIH ChestX-ray14; no images are committed to the repo. Files come one by one from the public Kaggle mirror (`nih-chest-xrays/data`, no token), never the 42 GB of archives
+- [x] Pick 5 to 6 classes with enough examples and record the reasoning in the model card: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax
+- [x] Canonical schema from v1 (`image_id`, `patient_id`, `view_position`, `split`, label columns, `label_source`)
+- [x] Split by patient (hash of `patient_id`, see ADR 0003); `test_locked/` is a separate, frozen DVC path, and new labels from Label Studio can only go into `curated/`
+- [x] Small golden set with both PNG and DICOM, including at least one `MONOCHROME1` file to test inversion
+- [x] Pandera schema: allowed values, image size, no patient shared across splits or with `test_locked/`
+- [x] Prefect `ingest` flow: download → validate → `dvc add` + `dvc push` → load metadata into Postgres → record in `dataset_versions`
 
 **Training**
 
-- [ ] Model factory in `cxr_core` accepts only architectures with a GAP + linear head and fails at build time otherwise
-- [ ] Config profiles: `demo` (128 px, ResNet18, small subset) and `full` (DenseNet121 or EfficientNet-B0), validated with pydantic
-- [ ] Prefect `train` flow: validate → build dataset (pin DVC rev) → train → evaluate → export ONNX → E2E parity → build reference → register
-- [ ] `make train` runs the flow without a Prefect server under `core` (confirm the chosen Prefect version supports this) and through the server under `full`
-- [ ] Evaluate: per-class AUROC, sensitivity at fixed specificity, ECE, and subgroups (sex, age, view) on the locked test set and on the recent slice when available; write JSON + HTML reports to artifacts
-- [ ] Choose per-class thresholds on the validation set and store them with the model version, not in serving config
-- [ ] Export ONNX with 2 outputs (`logits`, `features`) and a dynamic batch axis
-- [ ] E2E parity: golden set from raw files → `cxr_core.preprocess` → ONNX vs PyTorch on probabilities, features, and CAM within tolerance
-- [ ] Build reference: embeddings, prediction distribution, and metadata distribution from the validation set as Parquet, logged as an artifact of the model version
-- [ ] Register with tags `dataset_rev`, `git_commit`, `preprocess_version`, `prefect_flow_run_id`, and thresholds, then set `@challenger`
-- [ ] `scripts/bootstrap_champion.py`: sets the first model as `@champion` and exports a seed bundle (ONNX + reference + thresholds) to attach to a GitHub Release
+- [x] Model factory in `cxr_core` accepts only architectures with a GAP + linear head and fails at build time otherwise (ADR 0004)
+- [x] Config profiles: `demo` (128 px, ResNet18, small subset) and `full` (DenseNet121 or EfficientNet-B0), validated with pydantic
+- [x] Prefect `train` flow: validate → build dataset (pin DVC rev) → train → evaluate → export ONNX → E2E parity → build reference → register
+- [x] `make train` runs the flow without a Prefect server under `core` (confirmed: Prefect 3.9 starts a temporary local server) and through the server under `full` (the host process reports to `prefect-server`; a worker container that runs deployments comes with Phase 5)
+- [x] Evaluate: per-class AUROC, sensitivity at fixed specificity, ECE, and subgroups (sex, age, view) on the locked test set and on the recent slice when available (the report has a `recent` slot that stays empty until Phase 5); write JSON + HTML reports to artifacts
+- [x] Choose per-class thresholds on the validation set and store them with the model version, not in serving config
+- [x] Export ONNX with 2 outputs (`logits`, `features`) and a dynamic batch axis
+- [x] E2E parity: golden set from raw files → `cxr_core.preprocess` → ONNX vs PyTorch on probabilities, features, and CAM within tolerance
+- [x] Build reference: embeddings, prediction distribution, and metadata distribution from the validation set as Parquet, logged as an artifact of the model version
+- [x] Register with tags `dataset_rev`, `git_commit`, `preprocess_version`, `prefect_flow_run_id`, and thresholds, then set `@challenger`
+- [x] `scripts/bootstrap_champion.py`: sets the first model as `@champion` and exports a seed bundle (ONNX + reference + thresholds) to attach to a GitHub Release
 
 **Done when** `make seed && make train` finishes on CPU, MLflow has a version with all tags and artifacts, parity passes, and the seed bundle builds (**M1**).
 
@@ -240,7 +240,7 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 **Open decisions**
 
 - [ ] N for `should_retrain()` and the gate margin
-- [ ] Which 5 to 6 classes to use
+- [x] Which 5 to 6 classes to use. Decided: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax (see the model card)
 - [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
 - [x] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name. Decided: `cxr_core` (diagram updated)
 - [ ] Internal API auth (shared token or a separate network)

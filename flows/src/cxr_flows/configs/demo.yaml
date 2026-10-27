@@ -1,0 +1,12 @@
+# CPU-friendly default: trains in minutes on a laptop. `make train CONFIG=demo`
+profile: demo
+architecture: resnet18
+pretrained: true
+image_size: 128
+epochs: 6
+batch_size: 32
+lr: 3.0e-4
+weight_decay: 1.0e-4
+drop_rate: 0.2
+augment: true
+max_train_images: null  # cap for quick iterations, e.g. 500

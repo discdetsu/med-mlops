@@ -1,8 +1,10 @@
 # Profiles:
 #   core: upload → heatmap demo and promotion through Django admin
 #   full: core + training, monitoring, and labeling loop
-# Phase 0 ships the infrastructure only. Nginx, the web UI, Django, and the Celery
-# worker are added to `core` in Phase 2; the Prefect worker is added in Phase 1.
+# Nginx, the web UI, Django, and the Celery worker are added to `core` in Phase 2. Flows
+# run on the host (`make seed`, `make train`): in-process under `core`, reporting to
+# prefect-server under `full`. A Prefect worker joins `full` in Phase 5, when
+# `should_retrain()` triggers the train deployment.
 name: cxr-mlops
 
 # One set of S3 settings for every client (boto3, MLflow, DVC, aws-cli), so the
