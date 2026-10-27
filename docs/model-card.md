@@ -11,15 +11,25 @@
 
 ## Data
 
-[NIH ChestX-ray14](https://nihcc.app.box.com/v/ChestXray-NIHCC): 112,120 frontal PNGs (1024 × 1024) of 30,805 patients, de-identified by NIH, with 14 findings mined from radiology reports by NLP. This project uses a subset downloaded from the public Kaggle mirror:
+[NIH ChestX-ray14](https://nihcc.app.box.com/v/ChestXray-NIHCC): 112,120 frontal PNGs (1024 × 1024) of 30,805 patients, de-identified by NIH, with 14 findings mined from radiology reports by NLP. The split is a hash of the patient ID, 70/15/15, so no patient is in more than one split ([ADR 0003](adr/0003-dataset-versions-and-locked-test.md)).
+
+**Current dataset, `dataset_rev` `f774f7a855ab`:** every NIH image, at NIH's own prevalence.
 
 | Split | Images | Patients | Atelectasis | Cardiomegaly | Effusion | Mass | Pneumothorax | AP views | Role |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| train | 2,822 | 2,035 | 592 | 385 | 734 | 474 | 444 | 1,196 | training |
-| val | 579 | 432 | 108 | 88 | 151 | 87 | 111 | 228 | epoch selection, thresholds, drift reference |
-| test_locked | 599 | 462 | 130 | 87 | 142 | 85 | 66 | 226 | reported metrics and the promotion gate; frozen |
+| train | 79,339 | 21,489 | 8,224 | 1,986 | 9,542 | 4,131 | 3,844 | 32,327 | training |
+| val | 16,166 | 4,646 | 1,626 | 424 | 1,802 | 800 | 737 | 5,999 | epoch selection, thresholds, drift reference |
+| test_locked | 16,615 | 4,670 | 1,709 | 366 | 1,973 | 851 | 721 | 6,484 | reported metrics and the promotion gate; frozen |
 
-The subset is sampled with a fixed seed: up to 500 images per class, plus 1,500 images with none of the 5 findings (`No Finding` or other findings only). The split is a hash of the patient ID, 70/15/15, so no patient is in more than one split ([ADR 0003](adr/0003-dataset-versions-and-locked-test.md)). The negative-to-positive ratio is therefore much lower than in NIH overall, so metrics that depend on prevalence (ECE, positive predictive value) don't transfer to the full dataset or to clinical prevalence.
+**Version 1's dataset, `dataset_rev` `bbc133af190d`:** the default `make seed` subset. Up to 500 images per class plus 1,500 with none of the 5 findings (`No Finding` or other findings only), sampled with a fixed seed. Its negative-to-positive ratio is much lower than NIH's, so its prevalence-dependent metrics (ECE, positive predictive value) don't transfer to the full dataset or to clinical prevalence.
+
+| Split | Images | Patients | Atelectasis | Cardiomegaly | Effusion | Mass | Pneumothorax | AP views |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| train | 2,822 | 2,035 | 592 | 385 | 734 | 474 | 444 | 1,196 |
+| val | 579 | 432 | 108 | 88 | 151 | 87 | 111 | 228 |
+| test_locked | 599 | 462 | 130 | 87 | 142 | 85 | 66 | 226 |
+
+The locked test set was rebuilt once, with the move to the full dataset, while version 1 was the only model. Every model trained from now on is evaluated on the 16,615-image set.
 
 ## Classes
 
@@ -40,9 +50,9 @@ Left out:
 
 ## Metrics
 
-From the `@champion` version's `reports/evaluation.json` in MLflow. Thresholds are chosen on val (maximum Youden's J); metrics are on test_locked (599 images, 462 patients), with 95% bootstrap CIs over images (500 resamples).
+From the `@champion` version's `reports/evaluation.json` in MLflow. Thresholds are chosen on val (maximum Youden's J); metrics have 95% bootstrap CIs over images (500 resamples).
 
-**Version 1** (`demo` profile: ResNet18, 128 px, 6 epochs on CPU, `dataset_rev` `bbc133af190d`): macro AUROC **0.700** (0.674 to 0.724), pooled ECE 0.026.
+**Version 1** (`demo` profile: ResNet18, 128 px, 6 epochs on CPU, `dataset_rev` `bbc133af190d`). These numbers are on the *old* 599-image test set (462 patients) and can't be compared with models evaluated on the current 16,615-image one: macro AUROC **0.700** (0.674 to 0.724), pooled ECE 0.026.
 
 | Class | Positives | AUROC (95% CI) | Sens @ spec 0.9 | Threshold | Sens | Spec | ECE |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -67,7 +77,7 @@ This version proves the pipeline, not the model. On the full dataset at 224 px o
 ## Limitations
 
 - **Noisy labels:** NIH labels were mined from reports by NLP, with reported accuracy above 90% overall but much lower for some findings. Some "negatives" are positives and vice versa, which caps achievable AUROC and makes small differences between models meaningless without the CIs.
-- **Small test set:** a few hundred images give wide CIs per class and wider ones per subgroup; subgroups below 30 images are not scored.
+- **Small test set (version 1):** 599 images give wide CIs per class and wider ones per subgroup; subgroups below 30 images are not scored. The current 16,615-image test set fixes this for later versions.
 - **Bootstrap over images, not patients:** patients with several test images make the CIs somewhat too narrow.
 - **One institution:** all images come from the NIH Clinical Center, so performance on other scanners, protocols, or populations is unknown, which is what the Phase 4 drift monitoring is for.
 - **Shortcuts:** AP views are mostly inpatient and sicker patients, and pneumothorax images often show chest drains. The model can learn these instead of the finding; the view subgroup results are the first place to look.

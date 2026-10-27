@@ -38,6 +38,6 @@ Once `data/test_locked.dvc` exists, `ingest` pulls and checks test_locked and go
 
 ## Alternatives considered
 
-- **NIH's official `train_val_list.txt` / `test_list.txt`:** patient-disjoint, but defined over the full 112k images. The demo uses a 3k subset, and new reviewer labels need a split rule anyway.
+- **NIH's official `train_val_list.txt` / `test_list.txt`:** patient-disjoint, but defined over the full 112k images. The default `make seed` takes a 4k subset, and new reviewer labels need a split rule anyway.
 - **Seeded shuffle of the sampled patients:** a patient's split would change with the subset size, so test patients could leak into training after a re-ingest.
 - **Git commit of the `.dvc` files as the rev:** not available until someone commits, and two commits can hold identical data.
