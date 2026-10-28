@@ -22,7 +22,7 @@ Files from a folder you pass are copied, never hard-linked, because DVC makes it
 
 ## Canonical schema
 
-One row per image, the same columns in every `metadata.csv` and in the `images` / `labels` tables in Postgres:
+One row per image, the same columns in every `metadata.csv`. In Postgres they are split across `images`, `labels`, and `dataset_images` (which version holds which image, and its `file`):
 
 `image_id`, `file` (relative to the dataset directory), `patient_id`, `patient_sex` (M/F), `patient_age` (empty if NIH's value is impossible), `view_position` (PA/AP), `follow_up`, `width`, `height` (measured from the file), `split` (train/val/test_locked), `label_source` (nih_nlp/reviewer), then one 0/1 column per class: `Atelectasis`, `Cardiomegaly`, `Effusion`, `Mass`, `Pneumothorax`.
 

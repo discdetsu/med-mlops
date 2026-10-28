@@ -28,7 +28,7 @@ Once `data/test_locked.dvc` exists, `ingest` pulls and checks test_locked and go
 
 **`dataset_rev` is content-addressed:** the first 12 hex digits of sha256 over the sorted `path:md5` lines of `data/nih` and `data/test_locked`. The same data always gets the same rev, whatever git commit or machine produced it. Each model version is tagged with the rev, the per-path md5s, and the git commit, and `--dataset-rev` makes `train` fail if the workspace holds different data.
 
-**Metadata lives in the app database too.** `ingest` upserts `dataset_versions`, `images`, and `labels` (long format, with `label_source`). The flows own these tables and create them idempotently; Django reads them through unmanaged models from Phase 2. Their names can't clash with Django's tables, which carry an app-label prefix.
+**Metadata lives in the app database too.** `ingest` records each version in `dataset_versions` and its membership in `dataset_images` (`dataset_rev`, `dvc_path`, `image_id`, `file`), so any version's images can be listed later. `images` and `labels` (long format, with `label_source`) hold one row per image and are upserted, because an image's metadata and NIH labels don't change between versions. The flows own these tables and create them idempotently; Django reads them through unmanaged models from Phase 2. Their names can't clash with Django's tables, which carry an app-label prefix.
 
 ## Consequences
 

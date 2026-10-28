@@ -50,14 +50,46 @@ def test_load_is_idempotent_and_queryable() -> None:
         assert version["dvc_md5"] == md5s
         with psycopg.connect(url) as conn:
             images = conn.execute(
-                "SELECT count(*), count(patient_age) FROM images WHERE dataset_rev = %s", (rev,)
+                "SELECT count(*), count(i.patient_age) FROM dataset_images m "
+                "JOIN images i USING (image_id) WHERE m.dataset_rev = %s",
+                (rev,),
             ).fetchone()
             positives = conn.execute(
-                "SELECT count(*) FROM labels WHERE dataset_rev = %s AND value = 1", (rev,)
+                "SELECT count(*) FROM labels WHERE image_id LIKE %s AND value = 1", (tag + "%",)
             ).fetchone()
         assert images == (6, 4)
         assert positives == (2,)
     finally:
+        _cleanup(url, tag, [rev])
+
+
+def test_each_version_keeps_its_own_membership() -> None:
+    url = os.environ["APP_DATABASE_URL"]
+    tag = f"_it{uuid.uuid4().hex[:8]}"
+    nih = _frame(tag, "train")
+    md5s = {"data/nih": "a.dir"}
+    old, new = tag + "a", tag + "b"
+    try:
+        load_dataset_version(url, old, md5s, {"data/nih": nih}, "deadbeef", None)
+        load_dataset_version(url, new, md5s, {"data/nih": nih.iloc[:1]}, "deadbeef", None)
         with psycopg.connect(url) as conn:
-            conn.execute("DELETE FROM images WHERE dataset_rev = %s", (rev,))
-            conn.execute("DELETE FROM dataset_versions WHERE dataset_rev = %s", (rev,))
+            members = dict(
+                conn.execute(
+                    "SELECT dataset_rev, count(*) FROM dataset_images "
+                    "WHERE dataset_rev IN (%s, %s) GROUP BY dataset_rev",
+                    (old, new),
+                ).fetchall()
+            )
+            images = conn.execute(
+                "SELECT count(*) FROM images WHERE image_id LIKE %s", (tag + "%",)
+            ).fetchone()
+        assert members == {old: 3, new: 1}
+        assert images == (3,)
+    finally:
+        _cleanup(url, tag, [old, new])
+
+
+def _cleanup(url: str, tag: str, revs: list[str]) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute("DELETE FROM dataset_versions WHERE dataset_rev = ANY(%s)", (revs,))
+        conn.execute("DELETE FROM images WHERE image_id LIKE %s", (tag + "%",))

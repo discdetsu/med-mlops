@@ -1,4 +1,4 @@
-"""Dataset metadata in the app database: `dataset_versions`, `images`, and `labels`.
+"""Dataset metadata in the app database: `dataset_versions`, `images`, `dataset_images`, `labels`.
 
 The flows own these tables and create them idempotently; Django (Phase 2) reads them through
 unmanaged models. Django's own tables are prefixed with the app label, so names can't clash.
@@ -34,40 +34,49 @@ CREATE TABLE IF NOT EXISTS images (
     follow_up     integer NOT NULL,
     width         integer NOT NULL,
     height        integer NOT NULL,
-    split         text NOT NULL,
-    dvc_path      text NOT NULL,                -- data/nih, data/test_locked, data/curated
-    file          text NOT NULL,                -- relative to dvc_path
-    dataset_rev   text NOT NULL REFERENCES dataset_versions
+    split         text NOT NULL                 -- fixed per patient (ADR 0003)
 );
 CREATE INDEX IF NOT EXISTS images_patient_id ON images (patient_id);
+
+-- Which images each version holds, so any version's membership can be rebuilt.
+CREATE TABLE IF NOT EXISTS dataset_images (
+    dataset_rev text NOT NULL REFERENCES dataset_versions ON DELETE CASCADE,
+    dvc_path    text NOT NULL,                  -- data/nih, data/test_locked, data/curated
+    image_id    text NOT NULL REFERENCES images,
+    file        text NOT NULL,                  -- relative to dvc_path
+    PRIMARY KEY (dataset_rev, dvc_path, image_id)
+);
 
 CREATE TABLE IF NOT EXISTS labels (
     image_id     text NOT NULL REFERENCES images ON DELETE CASCADE,
     label_source text NOT NULL,                 -- nih_nlp | reviewer
     class_name   text NOT NULL,
     value        smallint NOT NULL CHECK (value IN (0, 1)),
-    dataset_rev  text NOT NULL REFERENCES dataset_versions,
     PRIMARY KEY (image_id, label_source, class_name)
 );
 """
 
 _UPSERT_IMAGE = """
 INSERT INTO images (image_id, patient_id, patient_sex, patient_age, view_position, follow_up,
-                    width, height, split, dvc_path, file, dataset_rev)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    width, height, split)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (image_id) DO UPDATE SET
     patient_id = EXCLUDED.patient_id, patient_sex = EXCLUDED.patient_sex,
     patient_age = EXCLUDED.patient_age, view_position = EXCLUDED.view_position,
     follow_up = EXCLUDED.follow_up, width = EXCLUDED.width, height = EXCLUDED.height,
-    split = EXCLUDED.split, dvc_path = EXCLUDED.dvc_path, file = EXCLUDED.file,
-    dataset_rev = EXCLUDED.dataset_rev
+    split = EXCLUDED.split
+"""
+
+_INSERT_MEMBER = """
+INSERT INTO dataset_images (dataset_rev, dvc_path, image_id, file)
+VALUES (%s, %s, %s, %s)
+ON CONFLICT DO NOTHING
 """
 
 _UPSERT_LABEL = """
-INSERT INTO labels (image_id, label_source, class_name, value, dataset_rev)
-VALUES (%s, %s, %s, %s, %s)
-ON CONFLICT (image_id, label_source, class_name) DO UPDATE SET
-    value = EXCLUDED.value, dataset_rev = EXCLUDED.dataset_rev
+INSERT INTO labels (image_id, label_source, class_name, value)
+VALUES (%s, %s, %s, %s)
+ON CONFLICT (image_id, label_source, class_name) DO UPDATE SET value = EXCLUDED.value
 """
 
 
@@ -79,10 +88,11 @@ def load_dataset_version(
     git_commit: str,
     flow_run_id: str | None,
 ) -> None:
-    """Record one dataset version and upsert its images and labels in one transaction.
+    """Record one dataset version, its images, and their labels in one transaction.
 
-    `frames` maps a DVC path (e.g. `data/nih`) to its canonical metadata. Re-running with the
-    same rev is a no-op apart from refreshing rows.
+    `frames` maps a DVC path (e.g. `data/nih`) to its canonical metadata. Images and labels are
+    upserted by `image_id`; `dataset_images` keeps every version's membership. Re-running with
+    the same rev is a no-op apart from refreshing rows.
     """
     counts: dict[str, int] = {}
     for df in frames.values():
@@ -103,16 +113,14 @@ def load_dataset_version(
             (rev, Jsonb(dict(md5s)), Jsonb(counts), list(CLASSES), git_commit, flow_run_id),
         )
         for dvc_path, df in frames.items():
+            rows = _rows(df)
+            cur.executemany(_UPSERT_IMAGE, [_image_row(r) for r in rows])
             cur.executemany(
-                _UPSERT_IMAGE, [(*_image_row(r), dvc_path, r["file"], rev) for r in _rows(df)]
+                _INSERT_MEMBER, [(rev, dvc_path, r["image_id"], r["file"]) for r in rows]
             )
             cur.executemany(
                 _UPSERT_LABEL,
-                [
-                    (r["image_id"], r["label_source"], c, int(r[c]), rev)
-                    for r in _rows(df)
-                    for c in CLASSES
-                ],
+                [(r["image_id"], r["label_source"], c, int(r[c])) for r in rows for c in CLASSES],
             )
 
 
