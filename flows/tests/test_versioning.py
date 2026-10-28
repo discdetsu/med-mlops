@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from cxr_flows.versioning import dataset_rev, dvc_file, dvc_md5
+from cxr_flows.versioning import dataset_rev, dvc_file, dvc_md5, pinned_md5s
 
 
 def test_dataset_rev_is_order_independent_and_content_addressed() -> None:
@@ -17,3 +17,11 @@ def test_dvc_md5_reads_the_pointer_file(tmp_path: Path) -> None:
         "  hash: md5\n  path: nih\n"
     )
     assert dvc_md5(target) == "36a7112e01e72b6cffb24e7676353acf.dir"
+
+
+def test_pinned_md5s_keys_by_path_relative_to_root(tmp_path: Path) -> None:
+    targets = [tmp_path / "data" / "nih", tmp_path / "data" / "test_locked"]
+    targets[0].parent.mkdir()
+    for target, md5 in zip(targets, ("a", "b"), strict=True):
+        dvc_file(target).write_text(f"outs:\n- md5: {md5}.dir\n  path: {target.name}\n")
+    assert pinned_md5s(tmp_path, targets) == {"data/nih": "a.dir", "data/test_locked": "b.dir"}

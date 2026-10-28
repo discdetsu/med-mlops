@@ -56,6 +56,23 @@ def dvc_md5(target: Path) -> str:
     return str(outs[0]["md5"])
 
 
+def ensure_pinned(root: Path, targets: Sequence[Path]) -> None:
+    """Pull targets missing from the workspace; refuse any that differ from their .dvc file."""
+    for target in targets:
+        if not target.exists():
+            dvc_pull(root, [target])
+        if not is_clean(root, target):
+            rel = target.relative_to(root)
+            raise DatasetChangedError(
+                f"{rel} differs from {rel}.dvc; restore it with `dvc checkout {rel}`"
+            )
+
+
+def pinned_md5s(root: Path, targets: Sequence[Path]) -> dict[str, str]:
+    """`dvc_md5` of each target, keyed by its path relative to `root`; `dataset_rev`'s input."""
+    return {str(t.relative_to(root)): dvc_md5(t) for t in targets}
+
+
 def dataset_rev(md5s: Mapping[str, str]) -> str:
     """One short ID for a set of pinned DVC paths: sha256 over sorted `path:md5` lines.
 

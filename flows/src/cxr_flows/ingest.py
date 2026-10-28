@@ -24,23 +24,16 @@ from prefect.cache_policies import NO_CACHE
 
 from cxr_flows import golden, nih
 from cxr_flows.db import load_dataset_version
-from cxr_flows.schema import (
-    check_no_shared_patients,
-    read_metadata,
-    validate_dataset,
-    write_metadata,
-)
+from cxr_flows.schema import read_metadata, validate_versioned, write_metadata
 from cxr_flows.settings import Paths, app_database_url
 from cxr_flows.versioning import (
-    DatasetChangedError,
     dataset_rev,
     dvc_add,
     dvc_file,
-    dvc_md5,
-    dvc_pull,
     dvc_push,
+    ensure_pinned,
     git_commit,
-    is_clean,
+    pinned_md5s,
 )
 
 
@@ -56,14 +49,7 @@ def ensure_frozen(paths: Paths) -> bool:
     """Pull test_locked and golden if they exist in DVC; fail if the workspace copy differs."""
     if not dvc_file(paths.test_locked).exists():
         return False
-    for target in (paths.test_locked, paths.golden):
-        if not target.exists():
-            dvc_pull(paths.root, [target])
-        if not is_clean(paths.root, target):
-            rel = target.relative_to(paths.root)
-            raise DatasetChangedError(
-                f"{rel} differs from {rel}.dvc but is frozen; restore it with `dvc checkout {rel}`"
-            )
+    ensure_pinned(paths.root, [paths.test_locked, paths.golden])
     return True
 
 
@@ -133,9 +119,7 @@ def materialize(
 
 @task(cache_policy=NO_CACHE)
 def validate(paths: Paths, data: Datasets) -> None:
-    validate_dataset(data.nih, ("train", "val"), paths.nih)
-    validate_dataset(data.test_locked, ("test_locked",), paths.test_locked)
-    check_no_shared_patients({"data/nih": data.nih, "data/test_locked": data.test_locked})
+    validate_versioned(data.nih, paths.nih, data.test_locked, paths.test_locked)
     missing = set(data.golden["image_id"]) - set(data.test_locked["image_id"])
     if missing:
         raise ValueError(f"golden images not from test_locked: {sorted(missing)}")
@@ -148,7 +132,7 @@ def version(paths: Paths, frozen: bool, push: bool) -> dict[str, str]:
     dvc_add(paths.root, targets)
     if push:
         dvc_push(paths.root, [paths.nih, paths.test_locked, paths.golden])
-    return {str(t.relative_to(paths.root)): dvc_md5(t) for t in (paths.nih, paths.test_locked)}
+    return pinned_md5s(paths.root, paths.versioned)
 
 
 @flow(name="ingest", log_prints=True)

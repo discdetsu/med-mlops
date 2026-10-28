@@ -136,6 +136,16 @@ def validate_dataset(
     return metadata_schema(splits, image_root).validate(df, lazy=True)
 
 
+def validate_versioned(
+    nih: pd.DataFrame, nih_dir: Path, locked: pd.DataFrame, locked_dir: Path
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Validate data/nih and data/test_locked, then check that no patient is in both."""
+    nih = validate_dataset(nih, ("train", "val"), nih_dir)
+    locked = validate_dataset(locked, ("test_locked",), locked_dir)
+    check_no_shared_patients({"data/nih": nih, "data/test_locked": locked})
+    return nih, locked
+
+
 def _image_size(path: Path) -> tuple[int, int] | None:
     try:
         with Image.open(path) as img:

@@ -43,6 +43,11 @@ class Paths:
         return self.data / "test_locked"
 
     @property
+    def versioned(self) -> tuple[Path, Path]:
+        """The paths a dataset_rev covers. golden is pinned too, but parity-only."""
+        return (self.nih, self.test_locked)
+
+    @property
     def golden(self) -> Path:
         """A few PNG + DICOM files for the E2E parity test, from test_locked patients."""
         return self.data / "golden"

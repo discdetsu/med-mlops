@@ -31,16 +31,15 @@ from cxr_flows.evaluate import choose_thresholds, evaluate, render_html
 from cxr_flows.export import ParityReport, export_onnx, run_parity
 from cxr_flows.reference import build_reference, write_reference
 from cxr_flows.registry import register
-from cxr_flows.schema import CLASSES, check_no_shared_patients, read_metadata, validate_dataset
+from cxr_flows.schema import CLASSES, read_metadata, validate_versioned
 from cxr_flows.settings import MODEL_NAME, TRAIN_EXPERIMENT, Paths
 from cxr_flows.training import TrainResult, predict, train_model
 from cxr_flows.versioning import (
     DatasetChangedError,
     dataset_rev,
-    dvc_md5,
-    dvc_pull,
+    ensure_pinned,
     git_commit,
-    is_clean,
+    pinned_md5s,
 )
 
 
@@ -67,16 +66,8 @@ class Splits:
 @task(cache_policy=NO_CACHE)
 def validate_data(paths: Paths, expected_rev: str | None) -> PinnedData:
     """Pull missing data, refuse a workspace that differs from its .dvc pins, then validate."""
-    for target in (paths.nih, paths.test_locked, paths.golden):
-        if not target.exists():
-            dvc_pull(paths.root, [target])
-        if not is_clean(paths.root, target):
-            rel = target.relative_to(paths.root)
-            raise DatasetChangedError(
-                f"{rel} differs from {rel}.dvc; run `dvc checkout {rel}` or `make seed`"
-            )
-
-    md5s = {str(t.relative_to(paths.root)): dvc_md5(t) for t in (paths.nih, paths.test_locked)}
+    ensure_pinned(paths.root, [*paths.versioned, paths.golden])
+    md5s = pinned_md5s(paths.root, paths.versioned)
     rev = dataset_rev(md5s)
     if expected_rev is not None and rev != expected_rev:
         raise DatasetChangedError(
@@ -84,9 +75,9 @@ def validate_data(paths: Paths, expected_rev: str | None) -> PinnedData:
             "commit whose data/*.dvc files have that rev, then `dvc checkout`"
         )
 
-    nih = validate_dataset(read_metadata(paths.nih), ("train", "val"), paths.nih)
-    locked = validate_dataset(read_metadata(paths.test_locked), ("test_locked",), paths.test_locked)
-    check_no_shared_patients({"data/nih": nih, "data/test_locked": locked})
+    nih, locked = validate_versioned(
+        read_metadata(paths.nih), paths.nih, read_metadata(paths.test_locked), paths.test_locked
+    )
     manifest = golden_set.read_manifest(paths.golden)
     golden = [
         (paths.golden / f, i) for f, i in zip(manifest["file"], manifest["image_id"], strict=True)
