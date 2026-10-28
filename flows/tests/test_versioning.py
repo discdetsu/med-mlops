@@ -1,6 +1,17 @@
+from collections.abc import Sequence
 from pathlib import Path
 
-from cxr_flows.versioning import dataset_rev, dvc_file, dvc_md5, pinned_md5s
+import pytest
+
+from cxr_flows import versioning
+from cxr_flows.versioning import (
+    PinnedDataMissingError,
+    dataset_rev,
+    dvc_file,
+    dvc_md5,
+    ensure_pinned,
+    pinned_md5s,
+)
 
 
 def test_dataset_rev_is_order_independent_and_content_addressed() -> None:
@@ -25,3 +36,16 @@ def test_pinned_md5s_keys_by_path_relative_to_root(tmp_path: Path) -> None:
     for target, md5 in zip(targets, ("a", "b"), strict=True):
         dvc_file(target).write_text(f"outs:\n- md5: {md5}.dir\n  path: {target.name}\n")
     assert pinned_md5s(tmp_path, targets) == {"data/nih": "a.dir", "data/test_locked": "b.dir"}
+
+
+def test_ensure_pinned_explains_data_missing_from_the_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_pull(root: Path, targets: Sequence[Path]) -> None:
+        raise RuntimeError("dvc pull failed:\nMissing cache files")
+
+    monkeypatch.setattr(versioning, "dvc_pull", failing_pull)
+    target = tmp_path / "data" / "test_locked"
+    with pytest.raises(PinnedDataMissingError, match=r"data/test_locked is pinned") as info:
+        ensure_pinned(tmp_path, [target])
+    assert isinstance(info.value.__cause__, RuntimeError)

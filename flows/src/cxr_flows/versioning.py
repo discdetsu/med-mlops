@@ -15,6 +15,10 @@ class DatasetChangedError(RuntimeError):
     """The workspace doesn't match the DVC-pinned version of a dataset path."""
 
 
+class PinnedDataMissingError(RuntimeError):
+    """A dataset path is pinned in git, but neither the workspace nor the DVC remote has it."""
+
+
 def dvc(root: Path, *args: str) -> str:
     result = subprocess.run(
         [sys.executable, "-m", "dvc", *args], cwd=root, check=False, capture_output=True, text=True
@@ -59,10 +63,19 @@ def dvc_md5(target: Path) -> str:
 def ensure_pinned(root: Path, targets: Sequence[Path]) -> None:
     """Pull targets missing from the workspace; refuse any that differ from their .dvc file."""
     for target in targets:
+        rel = target.relative_to(root)
         if not target.exists():
-            dvc_pull(root, [target])
+            try:
+                dvc_pull(root, [target])
+            except RuntimeError as e:
+                raise PinnedDataMissingError(
+                    f"{rel} is pinned in {rel}.dvc but couldn't be pulled from the DVC remote. "
+                    "Pinned data can't be regenerated (test_locked is frozen), so it has to come "
+                    "from the remote that holds it: copy that remote's contents into this one. "
+                    "To start a dataset of your own instead, delete data/*.dvc and run "
+                    "`make seed`; its models are only comparable with each other."
+                ) from e
         if not is_clean(root, target):
-            rel = target.relative_to(root)
             raise DatasetChangedError(
                 f"{rel} differs from {rel}.dvc; restore it with `dvc checkout {rel}`"
             )
