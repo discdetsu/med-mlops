@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.14",
     "onnx>=1.19",
     "onnxruntime>=1.31",
+    "kagglehub>=0.3",
+    "psycopg[binary]>=3.3",
+    "pyyaml>=6",
 ]
 
 [build-system]

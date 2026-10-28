@@ -12,8 +12,19 @@ export MLFLOW_TRACKING_URI := http://localhost:5000
 # MLflow would hand out presigned URLs for http://rustfs:9000, which the host can't resolve.
 export MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD := false
 export MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD := false
+export MLFLOW_DISABLE_AGENT_HINT := 1
+export APP_DATABASE_URL := postgresql://app:$(APP_DB_PASSWORD)@localhost:5432/app
+# Under core, Prefect runs flows against a temporary in-process server; under full they
+# report to the Prefect server so runs show up in its UI.
+ifeq ($(PROFILE),full)
+export PREFECT_API_URL := http://localhost:4200/api
+endif
 
-.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration seed seed-model train demo
+CONFIG ?= demo
+SEED_ARGS ?=
+TRAIN_ARGS ?=
+
+.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration seed train bootstrap-champion seed-model demo
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -58,11 +69,14 @@ test:  ## Unit tests
 test-integration:  ## Integration tests against the running core stack
 	uv run pytest -m integration
 
-seed:  ## Phase 1: download the NIH subset and version it with DVC
-	@echo "not implemented yet (Phase 1)"; exit 1
+seed:  ## Download the NIH subset → validate → DVC add + push → Postgres (SEED_ARGS=...)
+	uv run python -m cxr_flows.ingest $(SEED_ARGS)
 
-train:  ## Phase 1: run the train flow
-	@echo "not implemented yet (Phase 1)"; exit 1
+train:  ## Train → evaluate → ONNX → parity → reference → register @challenger (CONFIG=demo|full)
+	uv run python -m cxr_flows.train --config $(CONFIG) $(TRAIN_ARGS)
+
+bootstrap-champion:  ## Make the first model @champion and build the seed bundle in dist/
+	uv run python scripts/bootstrap_champion.py
 
 seed-model:  ## Phase 2: download the seed bundle and register it as @champion
 	@echo "not implemented yet (Phase 2)"; exit 1

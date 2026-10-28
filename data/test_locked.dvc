@@ -1,0 +1,6 @@
+outs:
+- md5: e5ccfd2dca98fb618d470bf2d974d038.dir
+  size: 6663650466
+  nfiles: 16616
+  hash: md5
+  path: test_locked

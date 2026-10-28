@@ -4,9 +4,9 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 0, repo foundation.** The infrastructure runs and is tested; ML code, serving, and the UI come in later phases. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+Status: **Phase 1, data + training flow.** The infrastructure runs and is tested, and `make seed && make train` produces a registered `@challenger` on CPU. Serving and the UI come in Phase 2. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
 
-## Quickstart (infrastructure only, for now)
+## Quickstart (infrastructure + training, for now)
 
 Requires Docker with Compose v2, [uv](https://docs.astral.sh/uv/), and GNU make.
 
@@ -14,10 +14,17 @@ Requires Docker with Compose v2, [uv](https://docs.astral.sh/uv/), and GNU make.
 make install          # uv workspace (Python 3.14) + pre-commit hooks
 make up               # core profile: Postgres, RustFS, RabbitMQ, MLflow; waits until healthy
 make test             # unit tests
-make test-integration # RustFS, MLflow artifacts, DVC push/pull, RabbitMQ fanout
+make test-integration # RustFS, MLflow artifacts, DVC push/pull, RabbitMQ fanout, dataset tables
+make seed             # NIH subset from Kaggle → validate → DVC add + push → Postgres
+make train            # train → evaluate → ONNX → E2E parity → reference → register @challenger
+make bootstrap-champion  # first model → @champion, seed bundle in dist/
 make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana
 make help             # all targets
 ```
+
+`make seed` fetches 4,000 images (≈1.6 GB, about 30 minutes) one file at a time from the public [Kaggle mirror](https://www.kaggle.com/datasets/nih-chest-xrays/data) of NIH ChestX-ray14; no Kaggle token is needed. If you already have the full dataset unpacked, `make seed SEED_ARGS="--from-archive /path/to/dataset"` copies from it instead (seconds for the default subset; about 17 minutes for all 112k images with `--positives-per-class all --negatives all`, most of it `dvc push`); `--from-archive` alone downloads the 45 GB archive once (see [`data/README.md`](data/README.md)). `make train` uses the `demo` profile (ResNet18 at 128 px, trained on a fixed 4,000-image sample of the train split): about 30 minutes on a laptop CPU with the full dataset pinned, most of it scoring the 16k val images every epoch and the 16.6k `test_locked` images at the end. `make train CONFIG=full` uses DenseNet121 at 320 px; its float32 tensor cache needs about 1.2 MB per image, so on the full dataset it doesn't fit on most disks (about 140 GB). Both flows run without a Prefect server under `core`; with `PROFILE=full` they report to the Prefect UI. After a seed, commit the DVC pointers: `git add data/*.dvc && git commit`.
+
+The committed pointers pin the full NIH dataset, and its files live only in the DVC remote they were pushed to: the `datasets` bucket on the RustFS of the machine that seeded them. A fresh clone starts with an empty RustFS, so `make seed` and `make train` stop with `PinnedDataMissingError`, because the frozen `test_locked` can't be regenerated. Either copy that bucket's contents in from the machine that has them, or delete `data/*.dvc` and run `make seed` to start a dataset of your own, with its own locked test set (its models are only comparable with each other).
 
 `make up` copies `.env.example` to `.env` on first run. Change the passwords there for anything other than a local demo.
 
@@ -43,15 +50,17 @@ compose/               config mounted into compose services (one folder per serv
   rabbitmq/              plugins, model.events fanout, dlx → dlq, dead-letter policy
   mlflow/                MLflow server image (Postgres backend, RustFS artifacts)
   prometheus/ alertmanager/ grafana/
-packages/cxr_core/     shared preprocess / CAM / metrics; numpy only, torch behind [train]
+packages/cxr_core/     shared preprocess / CAM / metrics / bundle (numpy only); model factory behind [train]
 backend/               Django + Ninja API (Phase 2)
 worker/                Celery ONNX inference worker, no Django, no torch (Phase 2)
-flows/                 Prefect flows: ingest, train, promotion, monitor (Phase 1+)
+flows/                 Prefect flows: ingest, train (Phase 1); promotion, monitor later
+  src/cxr_flows/configs/ training profiles: demo, full
 frontend/              Svelte + Vite UI (Phase 2)
 data/                  DVC-tracked datasets; only .dvc pointers are committed
-scripts/               operational scripts (wait_healthy.sh; NIH download etc. later)
+scripts/               download_nih.py, bootstrap_champion.py, wait_healthy.sh
 tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
+docs/model-card.md     data, classes, metrics, limitations
 ```
 
 ## Decisions
@@ -60,4 +69,8 @@ See [`docs/adr/`](docs/adr/README.md).
 
 ## License
 
-Code: [MIT](LICENSE). Dataset terms and citation for NIH ChestX-ray14 will be added with the data pipeline (Phase 1).
+Code: [MIT](LICENSE).
+
+Data: NIH ChestX-ray14, provided by the NIH Clinical Center. The images are not redistributed here; `make seed` downloads them from the public Kaggle mirror, and you are bound by the dataset's own terms (see the [NIH release](https://nihcc.app.box.com/v/ChestXray-NIHCC)). If you use it, cite:
+
+> Wang X, Peng Y, Lu L, Lu Z, Bagheri M, Summers RM. ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks on Weakly-Supervised Classification and Localization of Common Thorax Diseases. IEEE CVPR 2017.

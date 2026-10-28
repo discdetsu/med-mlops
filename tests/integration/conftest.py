@@ -41,6 +41,9 @@ def host_env() -> None:
     os.environ.setdefault("MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD", "false")
     os.environ.setdefault("MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD", "false")
     os.environ.setdefault("RABBITMQ_URL", _rabbitmq_url(env))
+    os.environ.setdefault(
+        "APP_DATABASE_URL", f"postgresql://app:{env['APP_DB_PASSWORD']}@localhost:5432/app"
+    )
 
 
 def _rabbitmq_url(env: dict[str, str]) -> str:

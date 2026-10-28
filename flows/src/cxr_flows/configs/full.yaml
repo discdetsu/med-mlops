@@ -1,0 +1,13 @@
+# Closer to the literature; hours on CPU. Pair with a bigger ingest, e.g.
+# `make seed SEED_ARGS="--positives-per-class 2000 --negatives 6000"`.
+profile: full
+architecture: densenet121
+pretrained: true
+image_size: 320
+epochs: 12
+batch_size: 16
+lr: 1.0e-4
+weight_decay: 1.0e-4
+drop_rate: 0.2
+augment: true
+max_train_images: null
