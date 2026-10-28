@@ -52,7 +52,29 @@ Left out:
 
 From the `@champion` version's `reports/evaluation.json` in MLflow. Thresholds are chosen on val (maximum Youden's J); metrics have 95% bootstrap CIs over images (500 resamples).
 
-**Version 1** (`demo` profile: ResNet18, 128 px, 6 epochs on CPU, `dataset_rev` `bbc133af190d`). These numbers are on the *old* 599-image test set (462 patients) and can't be compared with models evaluated on the current 16,615-image one: macro AUROC **0.700** (0.674 to 0.724), pooled ECE 0.026.
+**Version 2, `@champion`** (`demo` profile: ResNet18, 128 px, 6 epochs on CPU, `dataset_rev` `f774f7a855ab`). Trained on a fixed 4,000-image sample of the train split; thresholds and epoch selection use the whole val split. On the 16,615-image test set (4,670 patients): macro AUROC **0.708** (0.700 to 0.717), pooled ECE 0.006. ECE and the thresholds are low because the test set has NIH's own prevalence.
+
+| Class | Positives | AUROC (95% CI) | Sens @ spec 0.9 | Threshold | Sens | Spec | ECE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Atelectasis | 1,709 | 0.715 (0.704 to 0.726) | 0.264 | 0.092 | 0.708 | 0.608 | 0.009 |
+| Cardiomegaly | 366 | 0.636 (0.608 to 0.666) | 0.150 | 0.018 | 0.656 | 0.572 | 0.004 |
+| Effusion | 1,973 | 0.799 (0.790 to 0.808) | 0.429 | 0.084 | 0.811 | 0.646 | 0.018 |
+| Mass | 851 | 0.644 (0.624 to 0.664) | 0.208 | 0.042 | 0.632 | 0.567 | 0.008 |
+| Pneumothorax | 721 | 0.748 (0.730 to 0.764) | 0.359 | 0.039 | 0.707 | 0.659 | 0.004 |
+
+| Subgroup | n | Macro AUROC |
+| --- | --- | --- |
+| Male | 9,279 | 0.702 |
+| Female | 7,336 | 0.715 |
+| PA view | 10,131 | 0.740 |
+| AP view | 6,484 | 0.642 |
+| Age < 40 | 5,532 | 0.718 |
+| Age 40 to 59 | 7,112 | 0.712 |
+| Age 60+ | 3,965 | 0.674 |
+
+This version proves the pipeline, not the model. On the full dataset at 224 px or more, published baselines reach about 0.71 to 0.81 on these five classes (Wang et al., 2017) and 0.81 to 0.93 (CheXNet, Rajpurkar et al., 2017), on NIH's official split rather than this one. It sees 5% of the training images, and 128 px is coarse, Cardiomegaly especially; validation AUROC levelled off at about 0.71 from epoch 4. More training images, the `full` profile, or both should close most of the gap. The AP gap (0.642 vs 0.740 for PA) matches the shortcut risk below.
+
+**Version 1** (same profile, `dataset_rev` `bbc133af190d`, no longer champion). Its numbers are on the *old* 599-image test set (462 patients) and can't be compared with version 2 or anything later: macro AUROC **0.700** (0.674 to 0.724), pooled ECE 0.026.
 
 | Class | Positives | AUROC (95% CI) | Sens @ spec 0.9 | Threshold | Sens | Spec | ECE |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -71,8 +93,6 @@ From the `@champion` version's `reports/evaluation.json` in MLflow. Thresholds a
 | Age < 40 | 172 | 0.740 |
 | Age 40 to 59 | 288 | 0.688 |
 | Age 60+ | 139 | 0.671 |
-
-This version proves the pipeline, not the model. On the full dataset at 224 px or more, published baselines reach about 0.71 to 0.81 on these five classes (Wang et al., 2017) and 0.81 to 0.93 (CheXNet, Rajpurkar et al., 2017), on NIH's official split rather than this one. Validation AUROC was still rising at the last epoch, and 128 px is coarse, Cardiomegaly especially. A longer run, the `full` profile, or a bigger subset should close most of the gap. The weaker AP subgroup matches the shortcut risk below.
 
 ## Limitations
 
