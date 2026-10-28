@@ -24,7 +24,7 @@ The promotion gate (Phase 3) compares `@champion` and `@challenger` on the same 
 | `data/golden/` | 3 test_locked images as PNG + DICOM MONOCHROME2 + MONOCHROME1 | created with test_locked, then frozen |
 | `data/curated/` | reviewer labels (Phase 5) | the only place new labels may go |
 
-Once `data/test_locked.dvc` exists, `ingest` pulls and checks test_locked and golden but never rewrites them, and drops sampled images from test_locked patients. The `train` flow refuses to run if nih, test_locked, or golden differs from its `.dvc` pointer. Pandera checks the canonical schema, image files and sizes, one split per patient, and no patient shared between `data/nih` and `data/test_locked`.
+Once `data/test_locked.dvc` exists, `ingest` pulls and checks test_locked and golden but never rewrites them, and drops sampled images from test_locked patients. The `train` flow refuses to run if nih, test_locked, or golden differs from its `.dvc` pointer. Pandera checks the canonical schema, image files and sizes, and one split per patient; `check_no_shared_patients` checks that no patient is in both `data/nih` and `data/test_locked`.
 
 **`dataset_rev` is content-addressed:** the first 12 hex digits of sha256 over the sorted `path:md5` lines of `data/nih` and `data/test_locked`. The same data always gets the same rev, whatever git commit or machine produced it. Each model version is tagged with the rev, the per-path md5s, and the git commit, and `--dataset-rev` makes `train` fail if the workspace holds different data.
 

@@ -78,12 +78,12 @@ Get a repo where `make up` starts all `core` infrastructure with health checks a
 
 **Data**
 
-- [x] `scripts/download_nih.py` selects a subset of NIH ChestX-ray14; no images are committed to the repo. Files come one by one from the public Kaggle mirror (`nih-chest-xrays/data`, no token), never the 42 GB of archives
+- [x] `scripts/download_nih.py` selects a subset of NIH ChestX-ray14, or every image with `all`; no images are committed to the repo. By default files come one by one from the public Kaggle mirror (`nih-chest-xrays/data`, no token); `--from-archive` uses Kaggle's full archive (about 45 GB, downloaded once, or an extracted copy) for large subsets. The committed pins hold the full dataset
 - [x] Pick 5 to 6 classes with enough examples and record the reasoning in the model card: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax
 - [x] Canonical schema from v1 (`image_id`, `patient_id`, `view_position`, `split`, label columns, `label_source`)
 - [x] Split by patient (hash of `patient_id`, see ADR 0003); `test_locked/` is a separate, frozen DVC path, and new labels from Label Studio can only go into `curated/`
 - [x] Small golden set with both PNG and DICOM, including at least one `MONOCHROME1` file to test inversion
-- [x] Pandera schema: allowed values, image size, no patient shared across splits or with `test_locked/`
+- [x] Pandera schema: allowed values, image size, no patient shared across splits; a separate check (`check_no_shared_patients`) keeps patients out of both `nih/` and `test_locked/`
 - [x] Prefect `ingest` flow: download → validate → `dvc add` + `dvc push` → load metadata into Postgres → record in `dataset_versions`
 
 **Training**
@@ -208,7 +208,7 @@ Tests arrive with the phase that builds what they test. Unit, schema, parity, an
 | --- | --- | --- | --- |
 | Unit | `cxr_core.preprocess` (`MONOCHROME1`, windowing), CAM, metrics, gate statistics, `should_retrain()` | Every push | 0 |
 | Integration | RustFS, MLflow artifacts, DVC push/pull, `model.events` | Every push (services in CI) | 0 |
-| Schema | Pandera, no patient shared across splits or with `test_locked/` | `ingest` flow + CI on a sample | 1 |
+| Schema | Pandera, no patient shared across splits; `check_no_shared_patients` against `test_locked/` | `ingest` flow + CI on a sample | 1 |
 | E2E parity | Golden set from raw files → ONNX vs PyTorch (probabilities, features, CAM) | `train` flow + CI with a small model | 1 |
 | API contract | Ninja endpoints, internal API auth | Every push | 2 |
 | Smoke | `core` up → seed model → upload golden image → result with `model_version` | Push to `main` | 2 |

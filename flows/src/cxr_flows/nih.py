@@ -1,5 +1,6 @@
 """NIH ChestX-ray14 from Kaggle (`nih-chest-xrays/data`): metadata → canonical rows, patient
-split, subset selection, and per-file image download (never the 42 GB of archives)."""
+split, subset selection, and image fetching: one file at a time by default, or from Kaggle's
+full archive (about 45 GB) with `--from-archive`."""
 
 import hashlib
 import logging

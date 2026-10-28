@@ -30,6 +30,6 @@ One row per image, the same columns in every `metadata.csv`. In Postgres they ar
 
 - The split is a hash of `patient_id` (70/15/15), so a patient is always in exactly one split, whatever subset is drawn.
 - No patient may appear in both `nih/` and `test_locked/`, or later in `curated/` and `test_locked/`.
-- Pandera checks the schema, the files and their sizes, and both rules in `ingest`, again in `train`, and in CI on synthetic data.
+- Pandera checks the schema, the files and their sizes, and the first rule; `check_no_shared_patients` checks the second. Both run in `ingest`, again in `train`, and in CI on synthetic data.
 
 See [ADR 0003](../docs/adr/0003-dataset-versions-and-locked-test.md) for the reasoning and for what `dataset_rev` means.
