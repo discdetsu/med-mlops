@@ -18,13 +18,11 @@ import onnxruntime as ort
 import torch
 
 from cxr_core.cam import class_activation_map
+from cxr_core.inference import ONNX_INPUT, ONNX_OUTPUTS, run_onnx, sigmoid
 from cxr_core.model import CamModel
 from cxr_core.preprocess import load_image, preprocess
 from cxr_flows.config import ParityTolerance
-from cxr_flows.training import sigmoid
 
-INPUT_NAME = "image"
-OUTPUT_NAMES = ("logits", "features")
 OPSET = 18
 
 
@@ -40,9 +38,9 @@ def export_onnx(model: CamModel, image_size: int, path: Path) -> Path:
             model,
             (dummy,),
             str(path),
-            input_names=[INPUT_NAME],
-            output_names=list(OUTPUT_NAMES),
-            dynamic_axes={name: {0: "batch"} for name in (INPUT_NAME, *OUTPUT_NAMES)},
+            input_names=[ONNX_INPUT],
+            output_names=list(ONNX_OUTPUTS),
+            dynamic_axes={name: {0: "batch"} for name in (ONNX_INPUT, *ONNX_OUTPUTS)},
             opset_version=OPSET,
             dynamo=False,
         )
@@ -95,7 +93,7 @@ def run_parity(
         inputs.append(x)
         with torch.inference_mode():
             t_logits, t_features = (t.numpy() for t in model(torch.from_numpy(x)))
-        o_logits, o_features = _run(session, x)
+        o_logits, o_features = run_onnx(session, x)
 
         t_probs, o_probs = sigmoid(t_logits), sigmoid(o_logits)
         cam_diff = max(
@@ -122,8 +120,8 @@ def run_parity(
         stacked = np.stack(probs)
         report.cross_format[image_id] = float((stacked.max(axis=0) - stacked.min(axis=0)).max())
 
-    batched_logits, _ = _run(session, np.concatenate(inputs))
-    single = np.concatenate([_run(session, x)[0] for x in inputs])
+    batched_logits, _ = run_onnx(session, np.concatenate(inputs))
+    single = np.concatenate([run_onnx(session, x)[0] for x in inputs])
     report.batch = float(np.abs(sigmoid(batched_logits) - sigmoid(single)).max())
 
     for f in report.files:
@@ -137,10 +135,3 @@ def run_parity(
         report.failures.append(f"batched vs single probability diff {report.batch:.2e}")
     report.passed = not report.failures
     return report
-
-
-def _run(
-    session: ort.InferenceSession, x: npt.NDArray[np.float32]
-) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-    logits, features = session.run(list(OUTPUT_NAMES), {INPUT_NAME: x})
-    return np.asarray(logits, dtype=np.float32), np.asarray(features, dtype=np.float32)

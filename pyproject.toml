@@ -27,6 +27,8 @@ dev = [
     "mlflow>=3.17",
     "dvc[s3]>=3.67",
     "kombu>=5.6",
+    "pytest-django>=4.14",
+    "django-stubs>=6.1",
 ]
 
 [tool.ruff]
@@ -36,6 +38,11 @@ extend-exclude = ["frontend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Django declares options (Meta, ModelAdmin, migrations) as mutable class attributes.
+"backend/src/cxr_backend/**" = ["RUF012"]
+"backend/src/cxr_backend/*/migrations/*" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["cxr_core", "cxr_backend", "cxr_worker", "cxr_flows"]
@@ -49,15 +56,24 @@ files = [
     "worker/src",
     "flows/src",
 ]
+plugins = ["mypy_django_plugin.main"]
 
-# Packages that ship neither type hints nor a stubs package; their APIs are typed as Any.
+[tool.django-stubs]
+django_settings_module = "cxr_backend.settings_test"
+
+# Packages typed as Any: they ship no type hints, or their stubs package (boto3-stubs,
+# celery-types, ...) isn't a dependency.
 [[tool.mypy.overrides]]
-module = ["kagglehub", "boto3", "boto3.*", "onnxruntime", "torchvision", "torchvision.*"]
+module = [
+    "kagglehub", "boto3", "boto3.*", "botocore.*", "onnxruntime", "torchvision", "torchvision.*",
+    "celery", "celery.*", "kombu", "kombu.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["packages/cxr_core/tests", "flows/tests", "tests"]
+testpaths = ["packages/cxr_core/tests", "flows/tests", "backend/tests", "worker/tests", "tests"]
 addopts = ["--import-mode=importlib", "-m", "not integration"]
+DJANGO_SETTINGS_MODULE = "cxr_backend.settings_test"
 markers = [
     "integration: needs the core compose stack running (make up)",
 ]

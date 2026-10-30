@@ -46,6 +46,17 @@ def host_env() -> None:
     )
 
 
+@pytest.fixture(scope="session")
+def dotenv() -> dict[str, str]:
+    return _load_dotenv()
+
+
+@pytest.fixture(scope="session")
+def gateway_url() -> str:
+    """nginx: the UI, /api, and /admin, as a browser sees them."""
+    return os.environ.get("CXR_GATEWAY_URL", "http://localhost:8000")
+
+
 def _rabbitmq_url(env: dict[str, str]) -> str:
     return f"amqp://{env['RABBITMQ_USER']}:{env['RABBITMQ_PASSWORD']}@localhost:5672//"
 

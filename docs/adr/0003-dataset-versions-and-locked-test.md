@@ -1,6 +1,6 @@
 # 0003: Hash-based patient split, a frozen locked test set, and content-addressed dataset revs
 
-- Status: Accepted
+- Status: Accepted; Django's access to these tables superseded by 0006
 - Date: 2026-10-27
 
 ## Context

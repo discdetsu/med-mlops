@@ -3,7 +3,15 @@ import sys
 
 import cxr_core
 
-SERVING_MODULES = ("cxr_core.preprocess", "cxr_core.cam", "cxr_core.metrics", "cxr_core.bundle")
+SERVING_MODULES = (
+    "cxr_core.preprocess",
+    "cxr_core.cam",
+    "cxr_core.metrics",
+    "cxr_core.bundle",
+    "cxr_core.inference",
+    "cxr_core.registry",
+    "cxr_core.messaging",
+)
 
 
 def test_preprocess_version_is_exported() -> None:

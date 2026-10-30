@@ -14,6 +14,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import v2
 
+from cxr_core.inference import sigmoid
 from cxr_core.metrics import per_class_auroc
 from cxr_core.model import CamModel, build_model
 from cxr_core.preprocess import IMAGENET_MEAN, IMAGENET_STD
@@ -38,10 +39,6 @@ class Predictions:
     @property
     def probabilities(self) -> npt.NDArray[np.float32]:
         return sigmoid(self.logits)
-
-
-def sigmoid(logits: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-    return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
 
 
 class _Inputs(Dataset[tuple[Tensor, Tensor]]):

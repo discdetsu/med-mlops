@@ -1,6 +1,6 @@
 # CXR MLOps Implementation Plan v2
 
-Last updated: 2026-10-27 · No deadlines: phases are ordered by dependency.
+Last updated: 2026-10-29 · No deadlines: phases are ordered by dependency.
 
 ## Goal and definition of done
 
@@ -108,27 +108,29 @@ This is the milestone the showcase needs: fresh clone → `make up` → `make se
 
 **Backend (Django + Ninja)**
 
-- [ ] Apps: `jobs`, `feedback`, `registry`, `monitoring`
-- [ ] Public API: `POST /api/jobs` (stores the file in `inference/raw/` → creates an `inference_job` → queues it), `GET /api/jobs/{id}`, `POST /api/jobs/{id}/feedback`
-- [ ] Internal API (shared token): `POST /internal/results` and `GET /internal/champion`, which returns the current version
-- [ ] Prediction rows store probabilities, the thresholds used, `model_version`, `preprocess_version`, heatmap path, and latency
-- [ ] `/metrics` endpoint for Prometheus in Phase 4
+- [x] Apps: `jobs`, `feedback`, `registry`, `monitoring`
+- [x] Public API: `POST /api/jobs` (stores the file in `inference/raw/` → creates an `inference_jobs` row → queues it), `GET /api/jobs/{id}`, `POST /api/jobs/{id}/feedback`; plus `GET /api/jobs/{id}/image` and `/heatmaps/{class}`, streamed from RustFS so the browser never talks to S3
+- [x] Internal API (shared token, and not routed by Nginx, see ADR 0005): `POST /internal/results` and `GET /internal/champion`, which returns the current version
+- [x] Prediction rows store probabilities, the thresholds used, `model_version`, `preprocess_version`, `mlflow_run_id`, `dataset_rev`, heatmap paths (one per class), and latency
+- [x] `/metrics` endpoint for Prometheus in Phase 4 (request latency, jobs, results, inference latency, feedback)
 
 **Queue + worker**
 
-- [ ] Celery worker with no Django and no torch: `cxr_core.preprocess` → ONNX Runtime → CAM → `POST /internal/results`
-- [ ] On startup, call `GET /internal/champion` and load vN from the artifacts bucket
-- [ ] Subscribe to `model.events` with an exclusive queue and swap the ONNX session atomically after the current job finishes
-- [ ] Retries, job timeout, and poison messages routed to the DLQ
+- [x] Celery worker with no Django and no torch: `cxr_core.preprocess` → ONNX Runtime → CAM → `POST /internal/results`; the ONNX call is `cxr_core.inference`, the same code E2E parity checks
+- [x] On startup, call `GET /internal/champion` and load vN from the artifacts bucket (again after every reconnect, to catch missed events)
+- [x] Subscribe to `model.events` with an exclusive queue and swap the ONNX session atomically after the current job finishes (solo pool: the event runs between jobs, ADR 0005)
+- [x] Retries, job timeout, and poison messages routed to the DLQ
 
 **Frontend + gateway**
 
-- [ ] Svelte + Vite: upload, job status, Cornerstone3D viewer with heatmap overlay and opacity slider, per-class probabilities with threshold markers, feedback form (agree or correct labels)
-- [ ] "Not for clinical use" banner on every page
-- [ ] Nginx: `/api` and `/admin` to the backend, `/` serves static files, rate limiting, and an upload size limit
-- [ ] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion`
+- [x] Svelte + Vite: upload, job status, viewer with heatmap overlay and opacity slider, per-class probabilities with threshold markers, feedback form (agree or correct labels). The viewer is a plain canvas (cut list item 5) rather than Cornerstone3D: the worker renders a display PNG, so the browser never decodes DICOM
+- [x] "Not for clinical use" banner on every page
+- [x] Nginx: `/api` and `/admin` to the backend, `/` serves static files, rate limiting, and an upload size limit
+- [ ] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion` (`SEED_BUNDLE=dist/…` for a local one). The release itself (`gh release create seed-v2 …`) waits on the NIH terms decision below
 
 **Done when** a fresh clone runs the three commands above, uploads an image from the golden set, shows the heatmap, and the prediction row has the correct `model_version`. A CI smoke test runs the same flow with `curl` (**M2**).
+
+**Not met yet:** everything works with a local bundle (`make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`), but a fresh clone can't seed until the `seed-v2` release is published. Until then the CI smoke job skips with a warning.
 
 ## Phase 3: Registry + promotion
 
@@ -243,4 +245,4 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 - [x] Which 5 to 6 classes to use. Decided: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax (see the model card)
 - [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
 - [x] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name. Decided: `cxr_core` (diagram updated)
-- [ ] Internal API auth (shared token or a separate network)
+- [x] Internal API auth (shared token or a separate network). Decided: both; a bearer token on `/internal/*`, which Nginx also doesn't route (ADR 0005)

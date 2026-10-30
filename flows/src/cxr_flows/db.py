@@ -1,7 +1,8 @@
 """Dataset metadata in the app database: `dataset_versions`, `images`, `dataset_images`, `labels`.
 
-The flows own these tables and create them idempotently; Django (Phase 2) reads them through
-unmanaged models. Django's own tables are prefixed with the app label, so names can't clash.
+The flows own these tables and create them idempotently; Django will read them through unmanaged
+models when it needs them (ADR 0006). The backend's tables (`inference_jobs`, `predictions`,
+`feedback`, see ADR 0005) use explicit names too, so new tables here must not reuse those.
 """
 
 import json

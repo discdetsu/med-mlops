@@ -4,17 +4,32 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 1, data + training flow.** The infrastructure runs and is tested, and `make seed && make train` produces a registered `@challenger` on CPU. Serving and the UI come in Phase 2. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+Status: **Phase 2, serving core.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
 
-## Quickstart (infrastructure + training, for now)
+## Quickstart: upload → heatmap
 
-Requires Docker with Compose v2, [uv](https://docs.astral.sh/uv/), and GNU make.
+Requires Docker with Compose v2 and GNU make.
+
+```sh
+make up           # core profile: builds and starts everything, waits until healthy
+make seed-model   # registers the released seed model as @champion; workers load it
+open http://localhost:8000
+```
+
+Upload a frontal chest X-ray (PNG, JPEG, or DICOM). The page shows the image with a heatmap for the selected finding, the probability of each of the five findings against its threshold, a feedback form, and which model version, dataset rev, and MLflow run produced the result. Django admin is at http://localhost:8000/admin/ (`DJANGO_ADMIN_USER` / `DJANGO_ADMIN_PASSWORD` from `.env`). `make smoke` runs the same flow with curl.
+
+`make seed-model` downloads `SEED_BUNDLE` (a GitHub Release asset, checked against its `.sha256`) and registers it in the local MLflow. The `seed-v2` release isn't published yet, so for now use a bundle you built with `make bootstrap-champion`: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway.
+
+How a request flows: Nginx → Django stores the upload in RustFS and queues a job on RabbitMQ → a Celery worker (ONNX Runtime, no torch) runs `cxr_core.preprocess` → ONNX → CAM and posts the result back → the UI polls for it. When `@champion` moves, a `model.events` fanout tells every worker to load the new version between jobs. Jobs that can never succeed go to the `dlq` queue. See [ADR 0005](docs/adr/0005-async-inference-queue.md).
+
+## Training and development
+
+Also requires [uv](https://docs.astral.sh/uv/).
 
 ```sh
 make install          # uv workspace (Python 3.14) + pre-commit hooks
-make up               # core profile: Postgres, RustFS, RabbitMQ, MLflow; waits until healthy
-make test             # unit tests
-make test-integration # RustFS, MLflow artifacts, DVC push/pull, RabbitMQ fanout, dataset tables
+make test             # unit + API contract tests
+make test-integration # against `make up`: RustFS, MLflow, DVC, RabbitMQ, dataset tables, gateway
 make seed             # NIH subset from Kaggle → validate → DVC add + push → Postgres
 make train            # train → evaluate → ONNX → E2E parity → reference → register @challenger
 make bootstrap-champion  # first model → @champion, seed bundle in dist/
@@ -30,6 +45,8 @@ The committed pointers pin the full NIH dataset, and its files live only in the 
 
 | Service | URL | Profile |
 | --- | --- | --- |
+| Web UI and API (Nginx) | http://localhost:8000 | core |
+| Django admin | http://localhost:8000/admin/ | core |
 | MLflow | http://localhost:5000 | core |
 | RustFS console | http://localhost:9001 | core |
 | RabbitMQ management | http://localhost:15672 | core |
@@ -39,7 +56,7 @@ The committed pointers pin the full NIH dataset, and its files live only in the 
 | Prometheus | http://localhost:9090 | full |
 | Alertmanager | http://localhost:9093 | full |
 
-All ports bind to `127.0.0.1` only.
+All ports bind to `127.0.0.1` only. Django has no published port: browsers reach it through Nginx, and its `/internal` API (for workers) and `/metrics` stay on the compose network.
 
 ## Repository layout
 
@@ -49,15 +66,17 @@ compose/               config mounted into compose services (one folder per serv
   rustfs/init.sh         buckets + inference/raw/ lifecycle rule
   rabbitmq/              plugins, model.events fanout, dlx → dlq, dead-letter policy
   mlflow/                MLflow server image (Postgres backend, RustFS artifacts)
+  nginx/                 gateway: UI, /api, /admin; rate and upload limits
   prometheus/ alertmanager/ grafana/
-packages/cxr_core/     shared preprocess / CAM / metrics / bundle (numpy only); model factory behind [train]
-backend/               Django + Ninja API (Phase 2)
-worker/                Celery ONNX inference worker, no Django, no torch (Phase 2)
-flows/                 Prefect flows: ingest, train (Phase 1); promotion, monitor later
+packages/cxr_core/     shared preprocess / ONNX inference / CAM / metrics / bundle / registry names
+                       (numpy only); model factory behind [train]
+backend/               Django + Ninja: jobs, feedback, registry (champion, seed_model), monitoring
+worker/                Celery ONNX inference worker, no Django, no torch
+flows/                 Prefect flows: ingest, train; promotion, monitor later
   src/cxr_flows/configs/ training profiles: demo, full
-frontend/              Svelte + Vite UI (Phase 2)
+frontend/              Svelte + Vite UI, built into the nginx image
 data/                  DVC-tracked datasets; only .dvc pointers are committed
-scripts/               download_nih.py, bootstrap_champion.py, wait_healthy.sh
+scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wait_healthy.sh
 tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
 docs/model-card.md     data, classes, metrics, limitations

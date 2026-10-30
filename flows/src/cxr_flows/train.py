@@ -24,6 +24,7 @@ from prefect.cache_policies import NO_CACHE
 
 from cxr_core.bundle import REFERENCE_FILE, Manifest, save_head
 from cxr_core.preprocess import PREPROCESS_VERSION
+from cxr_core.registry import MODEL_NAME
 from cxr_flows import golden as golden_set
 from cxr_flows.config import TrainConfig, load_config
 from cxr_flows.dataset import Split, load_split
@@ -32,7 +33,7 @@ from cxr_flows.export import ParityReport, export_onnx, run_parity
 from cxr_flows.reference import build_reference, write_reference
 from cxr_flows.registry import register
 from cxr_flows.schema import CLASSES, read_metadata, validate_versioned
-from cxr_flows.settings import MODEL_NAME, TRAIN_EXPERIMENT, Paths
+from cxr_flows.settings import TRAIN_EXPERIMENT, Paths
 from cxr_flows.training import TrainResult, predict, train_model
 from cxr_flows.versioning import (
     DatasetChangedError,

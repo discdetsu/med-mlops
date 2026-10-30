@@ -5,11 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-MODEL_NAME = "cxr-classifier"
+# Model name, aliases, and bucket names live in cxr_core.registry, shared with serving.
 TRAIN_EXPERIMENT = "cxr-train"
-ARTIFACTS_BUCKET = "artifacts"
-CHALLENGER_ALIAS = "challenger"
-CHAMPION_ALIAS = "champion"
 
 
 @dataclass(frozen=True)

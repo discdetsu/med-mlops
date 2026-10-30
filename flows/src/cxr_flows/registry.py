@@ -2,7 +2,7 @@
 
 The registered version's ONNX model is logged with the MLflow ONNX flavor; the serving bundle
 (`cxr_core.bundle`) is logged next to it under `bundle/` and copied to
-`s3://artifacts/models/<name>/<version>/`, where workers load it from (Phase 2). The
+`s3://artifacts/models/<name>/<version>/`, where workers load it from. The
 `@challenger` alias moves only after every tag and upload succeeded.
 """
 
@@ -19,11 +19,7 @@ import onnx
 from mlflow import MlflowClient
 
 from cxr_core.bundle import BUNDLE_FILES, Manifest
-from cxr_flows.settings import ARTIFACTS_BUCKET, CHALLENGER_ALIAS
-
-
-def bundle_prefix(model_name: str, version: str) -> str:
-    return f"models/{model_name}/{version}/"
+from cxr_core.registry import ARTIFACTS_BUCKET, CHALLENGER_ALIAS, bundle_prefix, bundle_uri
 
 
 def register(
@@ -69,7 +65,7 @@ def register(
     all_tags = {
         **tags,
         "thresholds": json.dumps(manifest.thresholds, sort_keys=True),
-        "bundle_uri": f"s3://{ARTIFACTS_BUCKET}/{prefix}",
+        "bundle_uri": bundle_uri(model_name, version),
         "mlflow_run_id": run_id,
     }
     for key, value in all_tags.items():
