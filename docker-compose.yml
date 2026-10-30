@@ -1,8 +1,7 @@
 # Profiles:
 #   core: upload → heatmap demo and promotion through Django admin
 #   full: core + training, monitoring, and labeling loop
-# Nginx, the web UI, Django, and the Celery worker are added to `core` in Phase 2. Flows
-# run on the host (`make seed`, `make train`): in-process under `core`, reporting to
+# Flows run on the host (`make seed`, `make train`): in-process under `core`, reporting to
 # prefect-server under `full`. A Prefect worker joins `full` in Phase 5, when
 # `should_retrain()` triggers the train deployment.
 name: cxr-mlops
@@ -19,6 +18,11 @@ x-s3-env: &s3-env
   # S3 URLs, so they never need to reach the object store directly.
   MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
   MLFLOW_ENABLE_PROXY_MULTIPART_UPLOAD: "false"
+
+# Django and the Celery worker talk to the same broker and share the internal API token.
+x-app-env: &app-env
+  CELERY_BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?set in .env}
 
 x-healthcheck: &healthcheck
   interval: 10s
@@ -138,6 +142,76 @@ services:
     healthcheck:
       <<: *healthcheck
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: cxr-mlops/backend:dev
+    profiles: [core, full]
+    environment:
+      <<: [*s3-env, *app-env]
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set in .env}
+      DJANGO_ADMIN_USER: ${DJANGO_ADMIN_USER:-admin}
+      DJANGO_ADMIN_PASSWORD: ${DJANGO_ADMIN_PASSWORD:?set in .env}
+      APP_DATABASE_URL: postgresql://app:${APP_DB_PASSWORD:?set in .env}@postgres:5432/app
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Fail a champion lookup in seconds, not after MLflow's default ~2 minutes of retries.
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    # No published port: browsers go through nginx, and /internal + /metrics stay on the
+    # compose network.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+      rabbitmq-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    image: cxr-mlops/worker:dev
+    profiles: [core, full]
+    environment:
+      <<: [*s3-env, *app-env]
+      BACKEND_URL: http://backend:8000
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-60}
+    depends_on:
+      backend:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+    healthcheck:
+      <<: *healthcheck
+      interval: 30s
+      timeout: 15s
+      # Answered by the worker's event loop, so this also fails if a job hangs it.
+      test: ["CMD-SHELL", "celery -A cxr_worker.app inspect ping -d celery@$$HOSTNAME --timeout 10 > /dev/null"]
+
+  nginx:
+    # The image is the built Svelte UI on nginx (frontend/Dockerfile).
+    build: ./frontend
+    image: cxr-mlops/web:dev
+    profiles: [core, full]
+    volumes:
+      - ./compose/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1:8000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
 
   # ---------------------------------------------------------------- full
 

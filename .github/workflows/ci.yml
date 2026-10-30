@@ -43,3 +43,21 @@ jobs:
         run: docker compose --profile core logs --no-color
       - if: always()
         run: make clean
+
+  # Fresh clone → make up → make seed-model → upload → prediction from @champion. Needs the
+  # seed bundle published as a GitHub Release (SEED_BUNDLE in the Makefile).
+  smoke:
+    name: Core smoke test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make up PROFILE=core
+      - run: make seed-model
+      - run: make smoke
+      - name: Service logs
+        if: failure()
+        run: docker compose --profile core logs --no-color
+      - if: always()
+        run: make clean
