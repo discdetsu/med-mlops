@@ -209,6 +209,14 @@ def test_fetch_checks_the_sidecar_by_default(tmp_path: Path) -> None:
         fetch(str(archive), tmp_path / "copy.tar.gz", expected_sha256=None)
 
 
+def test_fetch_refuses_a_local_bundle_without_a_sidecar(tmp_path: Path) -> None:
+    archive = tmp_path / "bundle.tar.gz"
+    write_bundle(archive)
+    Path(f"{archive}.sha256").unlink()
+    with pytest.raises(SeedError, match="never registered unverified"):
+        fetch(str(archive), tmp_path / "copy.tar.gz", expected_sha256=None)
+
+
 def test_extract_writes_only_bundle_files(tmp_path: Path) -> None:
     archive = tmp_path / "bundle.tar.gz"
     write_bundle(archive, extra={"../evil.sh": b"rm -rf /"})

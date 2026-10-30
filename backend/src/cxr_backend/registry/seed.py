@@ -49,8 +49,8 @@ class SeedResult:
 def fetch(source: str, dest: Path, expected_sha256: str | None) -> str:
     """Copy a local path or download an http(s) URL to `dest`; return its sha256.
 
-    For URLs without `expected_sha256`, `<url>.sha256` (written by bootstrap_champion.py)
-    must exist; a download is never registered unverified.
+    Without `expected_sha256`, `<source>.sha256` (written by bootstrap_champion.py) must
+    exist, for URLs and local paths alike; a bundle is never registered unverified.
     """
     is_url = source.startswith(("https://", "http://"))
     if is_url:
@@ -65,7 +65,9 @@ def fetch(source: str, dest: Path, expected_sha256: str | None) -> str:
     else:
         shutil.copyfile(source, dest)
         sidecar = Path(source + ".sha256")
-        if expected_sha256 is None and sidecar.exists():
+        if expected_sha256 is None:
+            if not sidecar.exists():
+                raise SeedError(f"{sidecar} is missing; a bundle is never registered unverified")
             expected_sha256 = sidecar.read_text().split()[0]
 
     digest = hashlib.sha256()
@@ -73,7 +75,7 @@ def fetch(source: str, dest: Path, expected_sha256: str | None) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     actual = digest.hexdigest()
-    if expected_sha256 is not None and actual != expected_sha256.lower():
+    if actual != expected_sha256.lower():
         raise SeedError(f"sha256 mismatch: expected {expected_sha256}, got {actual}")
     return actual
 
