@@ -8,9 +8,12 @@ exists, because from then on promotion goes through the gate and Django admin (P
 
 The seed bundle is the version's serving bundle (ONNX, head, reference, thresholds in the
 manifest) as dist/cxr-seed-bundle-v<N>.tar.gz plus a .sha256, ready to attach to a GitHub
-Release that `make seed-model` downloads (Phase 2):
+Release that `make seed-model` downloads:
 
     gh release create seed-v<N> dist/cxr-seed-bundle-v<N>.tar.gz{,.sha256}
+
+then point SEED_BUNDLE in the Makefile at it. `make seed-model SEED_BUNDLE=dist/...` registers
+a local bundle instead.
 
 Check the NIH ChestX-ray14 terms before publishing weights trained on it.
 """
@@ -27,12 +30,12 @@ from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
 
 from cxr_core.bundle import BUNDLE_FILES, Manifest
-from cxr_flows.registry import bundle_prefix
-from cxr_flows.settings import (
+from cxr_core.registry import (
     ARTIFACTS_BUCKET,
     CHALLENGER_ALIAS,
     CHAMPION_ALIAS,
     MODEL_NAME,
+    bundle_prefix,
 )
 
 
