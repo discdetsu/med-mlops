@@ -5,7 +5,6 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    broker_url: str
     backend_url: str
     internal_token: str
     model_cache: Path
@@ -16,6 +15,8 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        # CELERY_BROKER_URL is read by app.py at import; checking it here stops a worker
+        # from silently falling back to the in-memory broker.
         missing = [
             k
             for k in ("CELERY_BROKER_URL", "BACKEND_URL", "INTERNAL_API_TOKEN")
@@ -24,7 +25,6 @@ class Settings:
         if missing:
             raise RuntimeError(f"worker needs {', '.join(missing)} (see .env.example)")
         return cls(
-            broker_url=os.environ["CELERY_BROKER_URL"],
             backend_url=os.environ["BACKEND_URL"].rstrip("/"),
             internal_token=os.environ["INTERNAL_API_TOKEN"],
             model_cache=Path(os.environ.get("MODEL_CACHE_DIR", "/tmp/cxr-models")),

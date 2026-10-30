@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.http import HttpRequest
 
 from cxr_backend.feedback.models import Feedback
 
@@ -9,5 +10,5 @@ class FeedbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ["verdict", "model_version"]
     readonly_fields = [f.name for f in Feedback._meta.fields]
 
-    def has_add_permission(self, request, obj=None):  # type: ignore[no-untyped-def]
+    def has_add_permission(self, request: HttpRequest, obj: object = None) -> bool:
         return False

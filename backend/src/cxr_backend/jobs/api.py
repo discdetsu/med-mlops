@@ -134,7 +134,9 @@ def post_result(request: HttpRequest, payload: ResultIn) -> Status[ResultAck | E
 
 
 def job_out(job: InferenceJob) -> JobOut:
-    prediction = getattr(job, "prediction", None) if job.status == "succeeded" else None
+    prediction = (
+        getattr(job, "prediction", None) if job.status == InferenceJob.Status.SUCCEEDED else None
+    )
     return JobOut(
         id=job.id,
         status=job.status,

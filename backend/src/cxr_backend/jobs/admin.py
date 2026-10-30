@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.db.models import QuerySet
+from django.http import HttpRequest
 
 from cxr_backend.jobs.models import InferenceJob, Prediction
 
@@ -23,10 +25,10 @@ class InferenceJobAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         prediction = getattr(job, "prediction", None)
         return prediction.model_version if prediction else "-"
 
-    def get_queryset(self, request):  # type: ignore[no-untyped-def]
+    def get_queryset(self, request: HttpRequest) -> QuerySet[InferenceJob]:
         return super().get_queryset(request).select_related("prediction")
 
-    def has_add_permission(self, request, obj=None):  # type: ignore[no-untyped-def]
+    def has_add_permission(self, request: HttpRequest, obj: object = None) -> bool:
         return False
 
 
@@ -37,5 +39,5 @@ class PredictionAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     search_fields = ["job__id", "mlflow_run_id", "dataset_rev"]
     readonly_fields = [f.name for f in Prediction._meta.fields]
 
-    def has_add_permission(self, request, obj=None):  # type: ignore[no-untyped-def]
+    def has_add_permission(self, request: HttpRequest, obj: object = None) -> bool:
         return False

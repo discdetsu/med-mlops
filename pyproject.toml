@@ -61,7 +61,8 @@ plugins = ["mypy_django_plugin.main"]
 [tool.django-stubs]
 django_settings_module = "cxr_backend.settings_test"
 
-# Packages that ship neither type hints nor a stubs package; their APIs are typed as Any.
+# Packages typed as Any: they ship no type hints, or their stubs package (boto3-stubs,
+# celery-types, ...) isn't a dependency.
 [[tool.mypy.overrides]]
 module = [
     "kagglehub", "boto3", "boto3.*", "botocore.*", "onnxruntime", "torchvision", "torchvision.*",

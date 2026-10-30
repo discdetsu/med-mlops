@@ -5,15 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import numpy.typing as npt
 from PIL import Image
 
 from cxr_core.cam import class_activation_map
-from cxr_core.inference import run_onnx, sigmoid
+from cxr_core.inference import FloatArray, run_onnx, sigmoid
 from cxr_core.preprocess import load_image, preprocess, resize
 from cxr_worker.model import LoadedModel
-
-FloatArray = npt.NDArray[np.float32]
 
 
 class BadImage(Exception):

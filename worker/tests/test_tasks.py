@@ -31,7 +31,6 @@ def ctx(
         s3.add_bundle(info(v).bundle_uri, make_bundle(v))
     s3.objects[("inference", f"raw/{JOB}.png")] = golden_png.read_bytes()
     settings = Settings(
-        broker_url="memory://",
         backend_url="http://backend",
         internal_token="t",
         model_cache=tmp_path / "cache",
