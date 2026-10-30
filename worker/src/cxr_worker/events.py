@@ -31,8 +31,11 @@ def on_event(body: Any, message: Message) -> None:
     """Runs in the worker's event loop, so never in the middle of a job (solo pool)."""
     try:
         event = ChampionChanged.from_payload(body)
-        context().holder.load(ChampionInfo(event.model_name, event.model_version, event.bundle_uri))
     except Exception:
         logger.exception("ignoring model event %r", body)
+    else:
+        context().holder.switch(
+            ChampionInfo(event.model_name, event.model_version, event.bundle_uri)
+        )
     finally:
         message.ack()

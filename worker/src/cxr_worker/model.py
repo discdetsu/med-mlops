@@ -81,6 +81,9 @@ class ModelHolder:
         self.s3 = s3
         self.backend = backend
         self.current: LoadedModel | None = None
+        # Set when a swap fails, so the next job asks the registry again instead of serving
+        # the old version until the worker reconnects.
+        self.stale = False
 
     def load(self, info: ChampionInfo) -> LoadedModel:
         """Make `info` the current model; a no-op when it already is."""
@@ -107,15 +110,32 @@ class ModelHolder:
     def sync(self) -> LoadedModel | None:
         """Load whatever the backend says is `@champion`. Keeps the current model on errors."""
         try:
-            return self.load(self.backend.champion())
+            model = self.load(self.backend.champion())
         except NoChampion as exc:
             logger.warning("no model to serve yet: %s", exc)
         except Exception:
+            self.stale = True
             logger.exception("loading the champion failed; still serving %s", self._serving())
+        else:
+            self.stale = False
+            return model
         return self.current
 
+    def switch(self, info: ChampionInfo) -> None:
+        """Swap to `info` for a model event. On failure keep serving the current model and
+        retry through the registry before the next job."""
+        try:
+            self.load(info)
+        except Exception:
+            self.stale = True
+            logger.exception(
+                "swapping to version %s failed; still serving %s",
+                info.model_version,
+                self._serving(),
+            )
+
     def require(self) -> LoadedModel:
-        if self.current is None:
+        if self.current is None or self.stale:
             self.sync()
         if self.current is None:
             raise ModelUnavailable("no @champion loaded; run `make seed-model`")

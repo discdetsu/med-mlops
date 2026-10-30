@@ -76,3 +76,21 @@ def test_require_without_a_champion_raises(tmp_path: Path, s3: FakeS3) -> None:
     holder = ModelHolder(tmp_path / "cache", s3, FakeBackend())  # type: ignore[arg-type]
     with pytest.raises(ModelUnavailable):
         holder.require()
+
+
+def test_a_failed_switch_is_retried_before_the_next_job(
+    tmp_path: Path, s3: FakeS3, make_bundle: BundleFactory
+) -> None:
+    backend = FakeBackend(info("1"))
+    holder = holder_with(tmp_path, s3, backend, make_bundle, "1")
+    holder.require()
+    backend.champion_info = info("2")
+
+    holder.switch(info("2"))  # bundle not in S3 yet
+    assert holder.current is not None
+    assert holder.current.version == "1"
+    assert holder.stale
+
+    s3.add_bundle(info("2").bundle_uri, make_bundle("2"))
+    assert holder.require().version == "2"
+    assert not holder.stale
