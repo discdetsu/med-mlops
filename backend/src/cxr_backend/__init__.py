@@ -1,1 +1,2 @@
-"""Django project. Apps land here in Phase 2: jobs, feedback, registry, monitoring."""
+"""Django project: the public API (/api), the internal API for workers (/internal), the
+admin, and /metrics. Apps: jobs, feedback, registry, monitoring."""
