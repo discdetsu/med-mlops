@@ -45,7 +45,8 @@ jobs:
         run: make clean
 
   # Fresh clone → make up → make seed-model → upload → prediction from @champion. Needs the
-  # seed bundle published as a GitHub Release (SEED_BUNDLE in the Makefile).
+  # seed bundle published as a GitHub Release (SEED_BUNDLE in the Makefile); until it is, the
+  # job skips with a warning instead of failing, and runs by itself once the release exists.
   smoke:
     name: Core smoke test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -53,11 +54,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: make up PROFILE=core
-      - run: make seed-model
-      - run: make smoke
+      - name: Check the seed bundle is published
+        id: seed
+        run: |
+          url=$(make --eval='print-seed-bundle: ; @echo $(SEED_BUNDLE)' print-seed-bundle)
+          if curl -fsIL -o /dev/null "$url" && curl -fsIL -o /dev/null "$url.sha256"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::$url is not published yet; skipping the smoke test"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.seed.outputs.published == 'true'
+        run: make up PROFILE=core
+      - if: steps.seed.outputs.published == 'true'
+        run: make seed-model
+      - if: steps.seed.outputs.published == 'true'
+        run: make smoke
       - name: Service logs
-        if: failure()
+        if: failure() && steps.seed.outputs.published == 'true'
         run: docker compose --profile core logs --no-color
-      - if: always()
+      - if: always() && steps.seed.outputs.published == 'true'
         run: make clean

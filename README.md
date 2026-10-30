@@ -18,7 +18,7 @@ open http://localhost:8000
 
 Upload a frontal chest X-ray (PNG, JPEG, or DICOM). The page shows the image with a heatmap for the selected finding, the probability of each of the five findings against its threshold, a feedback form, and which model version, dataset rev, and MLflow run produced the result. Django admin is at http://localhost:8000/admin/ (`DJANGO_ADMIN_USER` / `DJANGO_ADMIN_PASSWORD` from `.env`). `make smoke` runs the same flow with curl.
 
-`make seed-model` downloads `SEED_BUNDLE` (a GitHub Release asset, checked against its `.sha256`) and registers it in the local MLflow. To use a bundle you built with `make bootstrap-champion` instead: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway.
+`make seed-model` downloads `SEED_BUNDLE` (a GitHub Release asset, checked against its `.sha256`) and registers it in the local MLflow. The `seed-v2` release isn't published yet, so for now use a bundle you built with `make bootstrap-champion`: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway.
 
 How a request flows: Nginx → Django stores the upload in RustFS and queues a job on RabbitMQ → a Celery worker (ONNX Runtime, no torch) runs `cxr_core.preprocess` → ONNX → CAM and posts the result back → the UI polls for it. When `@champion` moves, a `model.events` fanout tells every worker to load the new version between jobs. Jobs that can never succeed go to the `dlq` queue. See [ADR 0005](docs/adr/0005-async-inference-queue.md).
 

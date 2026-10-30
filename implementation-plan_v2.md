@@ -126,9 +126,11 @@ This is the milestone the showcase needs: fresh clone → `make up` → `make se
 - [x] Svelte + Vite: upload, job status, viewer with heatmap overlay and opacity slider, per-class probabilities with threshold markers, feedback form (agree or correct labels). The viewer is a plain canvas (cut list item 5) rather than Cornerstone3D: the worker renders a display PNG, so the browser never decodes DICOM
 - [x] "Not for clinical use" banner on every page
 - [x] Nginx: `/api` and `/admin` to the backend, `/` serves static files, rate limiting, and an upload size limit
-- [x] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion` (`SEED_BUNDLE=dist/…` for a local one). The release itself (`gh release create seed-v2 …`) waits on the NIH terms decision below
+- [ ] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion` (`SEED_BUNDLE=dist/…` for a local one). The release itself (`gh release create seed-v2 …`) waits on the NIH terms decision below
 
 **Done when** a fresh clone runs the three commands above, uploads an image from the golden set, shows the heatmap, and the prediction row has the correct `model_version`. A CI smoke test runs the same flow with `curl` (**M2**).
+
+**Not met yet:** everything works with a local bundle (`make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`), but a fresh clone can't seed until the `seed-v2` release is published. Until then the CI smoke job skips with a warning.
 
 ## Phase 3: Registry + promotion
 
