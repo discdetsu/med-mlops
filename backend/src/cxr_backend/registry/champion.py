@@ -22,16 +22,34 @@ def mlflow_client() -> MlflowClient:
     return MlflowClient(tracking_uri=settings.MLFLOW_TRACKING_URI)
 
 
+def aliases(client: MlflowClient) -> dict[str, str]:
+    """Alias → version for the model; empty before it is first registered.
+
+    Read from the registered model rather than by alias: for a model that exists, MLflow
+    answers a missing alias with INVALID_PARAMETER_VALUE, which can't be told apart from a
+    real error without parsing the message.
+    """
+    try:
+        model = client.get_registered_model(MODEL_NAME)
+    except MlflowException as exc:
+        if exc.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST):
+            return {}
+        raise
+    return {alias: str(version) for alias, version in model.aliases.items()}
+
+
+def alias_version(client: MlflowClient, alias: str) -> str | None:
+    """The version holding `alias`, or None when none does (or the model doesn't exist yet)."""
+    return aliases(client).get(alias)
+
+
 def current_champion(client: MlflowClient | None = None) -> Champion | None:
     """None when no version holds the alias yet (before `make seed-model`)."""
     client = client or mlflow_client()
-    try:
-        mv = client.get_model_version_by_alias(MODEL_NAME, CHAMPION_ALIAS)
-    except MlflowException as exc:
-        if exc.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST):
-            return None
-        raise
-    version = str(mv.version)
+    version = alias_version(client, CHAMPION_ALIAS)
+    if version is None:
+        return None
+    mv = client.get_model_version(MODEL_NAME, version)
     return Champion(
         model_name=MODEL_NAME,
         model_version=version,

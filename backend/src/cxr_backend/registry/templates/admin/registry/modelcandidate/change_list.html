@@ -1,0 +1,18 @@
+{% extends "admin/change_list.html" %}
+{% comment %}Candidates, the current aliases, and the rollback button.{% endcomment %}
+
+{% block object-tools-items %}
+  {% if can_promote and can_roll_back %}
+    <li><a href="{% url 'admin:registry_modelcandidate_rollback' %}">Roll back @champion to version {{ registry.previous }}</a></li>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}
+
+{% block content %}
+  {% if registry %}
+    <p>@champion: version {{ registry.champion|default:"unset" }} · @previous: {{ registry.previous|default:"unset" }} · @challenger: {{ registry.challenger|default:"unset" }}. A candidate can be approved only while @champion is the version its gate compared it with; otherwise re-run <code>make gate VERSION=N</code>.</p>
+  {% else %}
+    <p class="errornote">The model registry (MLflow) is unavailable: current aliases unknown.</p>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

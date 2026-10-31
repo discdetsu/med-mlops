@@ -1,8 +1,13 @@
-"""Dataset metadata in the app database: `dataset_versions`, `images`, `dataset_images`, `labels`.
+"""The flows' rows in the app database.
 
-The flows own these tables and create them idempotently; Django will read them through unmanaged
-models when it needs them (ADR 0006). The backend's tables (`inference_jobs`, `predictions`,
-`feedback`, see ADR 0005) use explicit names too, so new tables here must not reuse those.
+Dataset metadata: `dataset_versions`, `images`, `dataset_images`, `labels`. The flows own these
+tables and create them idempotently; Django will read them through unmanaged models when it
+needs them (ADR 0006). The backend's tables (`inference_jobs`, `predictions`, `feedback`, see
+ADR 0005) use explicit names too, so new tables here must not reuse those.
+
+Promotion candidates: `model_candidates` is the exception. Django owns it (its migration
+creates it when the backend starts) because the admin reads and updates it before and after
+any gate runs; the gate flow only inserts rows (ADR 0007).
 """
 
 import json
@@ -13,6 +18,7 @@ import pandas as pd
 import psycopg
 from psycopg.types.json import Jsonb
 
+from cxr_core.registry import CANDIDATES_TABLE, STATUS_GATE_FAILED, STATUS_PENDING
 from cxr_flows.schema import CLASSES
 
 DDL = """
@@ -136,6 +142,52 @@ def dataset_version(url: str, rev: str) -> dict[str, object] | None:
     if row is None:
         return None
     return {"dvc_md5": row[0], "counts": row[1], "git_commit": row[2]}
+
+
+# Re-gating a version replaces its gate result and reopens the decision; earlier decisions
+# stay in model_approvals.
+_UPSERT_CANDIDATE = f"""
+INSERT INTO {CANDIDATES_TABLE} (model_name, model_version, champion_version, status, gate_passed,
+                                auto_promote, report, report_uri, mlflow_run_id, dataset_rev,
+                                gated_at, decided_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(), NULL)
+ON CONFLICT (model_name, model_version) DO UPDATE SET
+    champion_version = EXCLUDED.champion_version, status = EXCLUDED.status,
+    gate_passed = EXCLUDED.gate_passed, auto_promote = EXCLUDED.auto_promote,
+    report = EXCLUDED.report, report_uri = EXCLUDED.report_uri,
+    mlflow_run_id = EXCLUDED.mlflow_run_id, dataset_rev = EXCLUDED.dataset_rev,
+    gated_at = EXCLUDED.gated_at, decided_at = NULL
+"""
+
+
+def record_candidate(
+    url: str,
+    *,
+    model_name: str,
+    model_version: str,
+    champion_version: str,
+    gate_passed: bool,
+    auto_promote: bool,
+    report: Mapping[str, Any],
+    report_uri: str,
+    mlflow_run_id: str,
+    dataset_rev: str,
+) -> None:
+    """Insert or refresh the version's row in `model_candidates`: `pending` approval when the
+    gate passed, `gate_failed` otherwise."""
+    status = STATUS_PENDING if gate_passed else STATUS_GATE_FAILED
+    row = (
+        model_name, model_version, champion_version, status, gate_passed, auto_promote,
+        Jsonb(dict(report)), report_uri, mlflow_run_id, dataset_rev,
+    )  # fmt: skip
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(_UPSERT_CANDIDATE, row)
+    except psycopg.errors.UndefinedTable:
+        raise RuntimeError(
+            f"{CANDIDATES_TABLE} doesn't exist yet: the backend's migrations create it when it "
+            "starts (`make up`)"
+        ) from None
 
 
 def _rows(df: pd.DataFrame) -> list[dict[str, Any]]:

@@ -3,11 +3,15 @@ and MLflow replaced by in-memory fakes."""
 
 import io
 from collections.abc import Callable
+from pathlib import Path
+from types import SimpleNamespace
 from typing import IO, Any
 
 import pytest
 from django.conf import settings
 from django.test import Client
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST
 
 import cxr_backend.jobs.api as jobs_api
 from cxr_backend import storage
@@ -36,11 +40,98 @@ class FakeS3:
         with open(path, "rb") as f:
             self.objects[(bucket, key)] = f.read()
 
+    def get_object(self, bucket: str, key: str) -> bytes:
+        from botocore.exceptions import ClientError
+
+        try:
+            return self.objects[(bucket, key)]
+        except KeyError:
+            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject") from None
+
+
+class FakeMlflow:
+    """The slice of MlflowClient that seed(), current_champion(), and promotion use."""
+
+    def __init__(self, champion: str | None = None) -> None:
+        self.versions: dict[str, dict[str, str]] = {}
+        self.aliases: dict[str, str] = {}
+        self.artifacts: dict[str, bytes] = {}
+        self.run_status: str | None = None
+        # ("set" | "delete", alias) pairs whose next call raises, as a flaky server would.
+        self.fail: set[tuple[str, str]] = set()
+        if champion is not None:
+            self.versions[champion] = {
+                "bundle_uri": f"s3://artifacts/models/cxr-classifier/{champion}/"
+            }
+            self.aliases["champion"] = champion
+
+    def get_registered_model(self, name: str) -> Any:
+        if not self.versions:
+            raise MlflowException("no model", error_code=RESOURCE_DOES_NOT_EXIST)
+        return SimpleNamespace(name=name, aliases=dict(self.aliases))
+
+    def get_model_version(self, name: str, version: str) -> Any:
+        return SimpleNamespace(version=version, tags=self.versions[version], run_id="run-x")
+
+    def get_model_version_by_alias(self, name: str, alias: str) -> Any:
+        # Like the real server: an unknown alias on an existing model is not "does not exist".
+        if not self.versions:
+            raise MlflowException("no model", error_code=RESOURCE_DOES_NOT_EXIST)
+        if alias not in self.aliases:
+            raise MlflowException(f"alias {alias} not found", error_code=INVALID_PARAMETER_VALUE)
+        return self.get_model_version(name, self.aliases[alias])
+
+    def get_experiment_by_name(self, name: str) -> None:
+        return None
+
+    def create_experiment(self, name: str) -> str:
+        return "1"
+
+    def create_run(self, experiment_id: str, run_name: str, tags: dict[str, str]) -> Any:
+        info = SimpleNamespace(
+            run_id="seed-run", artifact_uri="mlflow-artifacts:/1/seed-run/artifacts"
+        )
+        return SimpleNamespace(info=info)
+
+    def search_registered_models(self, filter_string: str) -> list[object]:
+        return []
+
+    def create_registered_model(self, name: str) -> None:
+        pass
+
+    def create_model_version(self, name: str, source: str, run_id: str, description: str) -> Any:
+        version = str(len(self.versions) + 1)
+        self.versions[version] = {}
+        return SimpleNamespace(version=version)
+
+    def log_artifacts(self, run_id: str, local_dir: str, artifact_path: str) -> None:
+        for path in Path(local_dir).iterdir():
+            self.artifacts[f"{artifact_path}/{path.name}"] = path.read_bytes()
+
+    def set_model_version_tag(self, name: str, version: str, key: str, value: str) -> None:
+        self.versions[version][key] = value
+
+    def set_registered_model_alias(self, name: str, alias: str, version: str) -> None:
+        self._maybe_fail("set", alias)
+        self.aliases[alias] = version
+
+    def delete_registered_model_alias(self, name: str, alias: str) -> None:
+        self._maybe_fail("delete", alias)
+        del self.aliases[alias]
+
+    def _maybe_fail(self, op: str, alias: str) -> None:
+        if (op, alias) in self.fail:
+            self.fail.discard((op, alias))
+            raise MlflowException(f"injected failure: {op} @{alias}")
+
+    def set_terminated(self, run_id: str, status: str = "FINISHED") -> None:
+        self.run_status = status
+
 
 @pytest.fixture
 def s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
     fake = FakeS3()
-    for name in ("put_raw", "get_inference_object", "upload_file"):
+    for name in ("put_raw", "get_inference_object", "upload_file", "get_object"):
         monkeypatch.setattr(storage, name, getattr(fake, name))
     return fake
 
