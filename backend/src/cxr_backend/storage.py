@@ -27,3 +27,9 @@ def get_inference_object(key: str) -> bytes:
 
 def upload_file(path: str, bucket: str, key: str) -> None:
     _client().upload_file(path, bucket, key)
+
+
+def get_object(bucket: str, key: str) -> bytes:
+    response = _client().get_object(Bucket=bucket, Key=key)
+    body: bytes = response["Body"].read()
+    return body
