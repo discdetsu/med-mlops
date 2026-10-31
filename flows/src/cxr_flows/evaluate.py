@@ -91,11 +91,11 @@ def evaluate(
     }
 
 
-def _subgroups(
-    y: Array, p: Array, meta: pd.DataFrame, classes: Sequence[str], min_size: int
-) -> dict[str, dict[str, Any]]:
+def subgroup_masks(meta: pd.DataFrame) -> dict[str, dict[str, npt.NDArray[np.bool_]]]:
+    """Row masks per subgroup value, grouped by attribute: sex, view, age band. Shared by the
+    evaluation report and the promotion gate, so both judge the same subgroups."""
     age = meta["patient_age"].astype("Float64")
-    groups: dict[str, dict[str, npt.NDArray[np.bool_]]] = {
+    return {
         "sex": {s: (meta["patient_sex"] == s).to_numpy() for s in ("M", "F")},
         "view": {v: (meta["view_position"] == v).to_numpy() for v in ("PA", "AP")},
         "age": {
@@ -103,8 +103,13 @@ def _subgroups(
             for lo, hi, label in AGE_BINS
         },
     }
+
+
+def _subgroups(
+    y: Array, p: Array, meta: pd.DataFrame, classes: Sequence[str], min_size: int
+) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
-    for name, masks in groups.items():
+    for name, masks in subgroup_masks(meta).items():
         out[name] = {}
         for value, mask in masks.items():
             n = int(mask.sum())
@@ -155,30 +160,35 @@ def render_html(title: str, reports: Mapping[str, Mapping[str, Any]]) -> str:
             rows.append(
                 "<tr>"
                 f"<td>{html.escape(c)}</td><td>{m['n_positive']}</td>"
-                f"<td>{_fmt(m['auroc'])} {_fmt_ci(m['auroc_ci95'])}</td>"
-                f"<td>{_fmt(m[sens_key])}</td><td>{_fmt(m['threshold'])}</td>"
-                f"<td>{_fmt(m['sensitivity'])}</td><td>{_fmt(m['specificity'])}</td>"
-                f"<td>{_fmt(m['ece'])}</td>"
+                f"<td>{fmt(m['auroc'])} {fmt_ci(m['auroc_ci95'])}</td>"
+                f"<td>{fmt(m[sens_key])}</td><td>{fmt(m['threshold'])}</td>"
+                f"<td>{fmt(m['sensitivity'])}</td><td>{fmt(m['specificity'])}</td>"
+                f"<td>{fmt(m['ece'])}</td>"
                 "</tr>"
             )
         sens_label = sens_key.removeprefix("sensitivity_at_specificity_") if rows else ""
         subgroup_rows = [
             f"<tr><td>{html.escape(group)}</td><td>{html.escape(value)}</td>"
-            f"<td>{s['n']}</td><td>{_fmt(s['macro_auroc'])}</td></tr>"
+            f"<td>{s['n']}</td><td>{fmt(s['macro_auroc'])}</td></tr>"
             for group, values in report["subgroups"].items()
             for value, s in values.items()
         ]
         sections.append(
             f"<h2>{html.escape(name)}</h2>"
             f"<p>n = {report['n']} images from {report['n_patients']} patients · "
-            f"macro AUROC {_fmt(report['macro_auroc'])} {_fmt_ci(report['macro_auroc_ci95'])} · "
-            f"ECE {_fmt(report['ece'])}</p>"
+            f"macro AUROC {fmt(report['macro_auroc'])} {fmt_ci(report['macro_auroc_ci95'])} · "
+            f"ECE {fmt(report['ece'])}</p>"
             "<table><tr><th>Class</th><th>Positives</th><th>AUROC (95% CI)</th>"
             f"<th>Sens @ spec {sens_label}</th><th>Threshold</th><th>Sens</th><th>Spec</th>"
             f"<th>ECE</th></tr>{''.join(rows)}</table>"
             "<h3>Subgroups</h3><table><tr><th>Group</th><th>Value</th><th>n</th>"
             f"<th>Macro AUROC</th></tr>{''.join(subgroup_rows)}</table>"
         )
+    return html_page(title, "".join(sections))
+
+
+def html_page(title: str, body: str) -> str:
+    """Minimal standalone report page around already-escaped `body` HTML."""
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<title>{html.escape(title)}</title><style>"
@@ -186,17 +196,20 @@ def render_html(title: str, reports: Mapping[str, Mapping[str, Any]]) -> str:
         "table{border-collapse:collapse;margin-bottom:1.5rem}"
         "td,th{border:1px solid #ccc;padding:.3rem .6rem;text-align:right}"
         "td:first-child,th:first-child{text-align:left}"
+        ".fail{color:#b00020;font-weight:600}.pass{color:#1b5e20}"
         "</style></head><body>"
         f"<h1>{html.escape(title)}</h1>"
         "<p><strong>Not a medical device.</strong> Research demo on NIH ChestX-ray14 "
         "NLP-mined labels.</p>"
-        f"{''.join(sections)}</body></html>\n"
+        f"{body}</body></html>\n"
     )
 
 
-def _fmt(value: float | None) -> str:
-    return "n/a" if value is None else f"{value:.3f}"
+def fmt(value: float | None, sign: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.3f}" if sign else f"{value:.3f}"
 
 
-def _fmt_ci(ci: Sequence[float] | None) -> str:
-    return "" if ci is None else f"({ci[0]:.3f} to {ci[1]:.3f})"
+def fmt_ci(ci: Sequence[float] | None, sign: bool = False) -> str:
+    return "" if ci is None else f"({fmt(ci[0], sign)} to {fmt(ci[1], sign)})"

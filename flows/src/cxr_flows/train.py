@@ -1,7 +1,9 @@
 """Prefect `train` flow: validate → build dataset (pinned DVC rev) → train → evaluate →
-export ONNX → E2E parity → build reference → register as `@challenger`.
+export ONNX → E2E parity → build reference → register as `@challenger` → promotion gate
+against `@champion` (the `promotion` flow).
 
     uv run python -m cxr_flows.train [--config demo|full|path.yaml] [--dataset-rev REV]
+                                     [--no-register] [--no-gate]
 
 Without PREFECT_API_URL, Prefect 3 runs the flow against a temporary local server, so this
 works under the `core` profile; with it set (`make train PROFILE=full`), runs show up in the
@@ -30,10 +32,11 @@ from cxr_flows.config import TrainConfig, load_config
 from cxr_flows.dataset import Split, load_split
 from cxr_flows.evaluate import choose_thresholds, evaluate, render_html
 from cxr_flows.export import ParityReport, export_onnx, run_parity
+from cxr_flows.promotion import promotion_flow
 from cxr_flows.reference import build_reference, write_reference
 from cxr_flows.registry import register
 from cxr_flows.schema import CLASSES, read_metadata, validate_versioned
-from cxr_flows.settings import TRAIN_EXPERIMENT, Paths
+from cxr_flows.settings import TRAIN_EXPERIMENT, Paths, require_mlflow_tracking_uri
 from cxr_flows.training import TrainResult, predict, train_model
 from cxr_flows.versioning import (
     DatasetChangedError,
@@ -166,9 +169,17 @@ def reference(cfg: TrainConfig, result: TrainResult, splits: Splits, bundle: Pat
 
 @flow(name="train", log_prints=True)
 def train_flow(
-    config: str = "demo", dataset_rev: str | None = None, register_model: bool = True
+    config: str = "demo",
+    dataset_rev: str | None = None,
+    register_model: bool = True,
+    gate: bool = True,
 ) -> str | None:
-    """Returns the registered model version, or None with `register_model=False`."""
+    """Returns the registered model version, or None with `register_model=False`.
+
+    With `gate`, the new version is then gated against `@champion` and recorded as a
+    candidate for approval in Django admin.
+    """
+    require_mlflow_tracking_uri()
     cfg = load_config(config)
     paths = Paths.discover()
     logger = get_run_logger()
@@ -257,6 +268,8 @@ def train_flow(
             },
         )
     logger.info("registered %s version %s as @challenger", MODEL_NAME, version)
+    if gate:
+        promotion_flow(version=version)
     return version
 
 
@@ -265,9 +278,13 @@ def main() -> None:
     parser.add_argument("--config", default="demo", help="profile name or YAML path")
     parser.add_argument("--dataset-rev", help="fail unless the workspace data has this rev")
     parser.add_argument("--no-register", action="store_true", help="log the run only")
+    parser.add_argument("--no-gate", action="store_true", help="register without gating")
     args = parser.parse_args()
     train_flow(
-        config=args.config, dataset_rev=args.dataset_rev, register_model=not args.no_register
+        config=args.config,
+        dataset_rev=args.dataset_rev,
+        register_model=not args.no_register,
+        gate=not args.no_gate,
     )
 
 
