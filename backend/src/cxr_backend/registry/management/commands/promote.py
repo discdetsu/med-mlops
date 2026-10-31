@@ -12,7 +12,8 @@ from cxr_core.registry import MODEL_NAME
 class Command(BaseCommand):
     help = (
         "Approve a gated candidate, the same as the admin's button (`promote VERSION --reason "
-        "...`), or the newest candidate the gate marked for auto_promote (`promote --auto`)."
+        "...`), or, with --auto, approve @challenger (or VERSION) only if the gate marked it for "
+        "auto_promote."
     )
 
     def add_arguments(self, parser: ArgumentParser) -> None:
@@ -22,18 +23,22 @@ class Command(BaseCommand):
         parser.add_argument(
             "--auto",
             action="store_true",
-            help="approve the newest pending candidate with auto_promote set; a no-op if none",
+            help="approve @challenger (or VERSION) if the gate marked it for auto_promote; a "
+            "no-op otherwise",
         )
 
     def handle(self, *args: Any, **options: Any) -> None:
         version, auto = options["version"], options["auto"]
-        if bool(version) == auto:
-            raise CommandError("give a VERSION or --auto, not both")
+        if not version and not auto:
+            raise CommandError("give a VERSION, or --auto")
         try:
             if auto:
-                decision = promotion.auto_promote()
+                decision = promotion.auto_promote(version)
                 if decision is None:
-                    self.stdout.write("auto_promote: no passed candidate marked for it")
+                    self.stdout.write(
+                        f"auto_promote: no passed candidate marked for it at version "
+                        f"{version or '@challenger'}"
+                    )
                     return
             else:
                 candidate = ModelCandidate.objects.filter(

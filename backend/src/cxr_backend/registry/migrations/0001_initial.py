@@ -53,7 +53,7 @@ class Migration(migrations.Migration):
                         help_text="Set by the gate when gate.yaml has auto_promote on",
                     ),
                 ),
-                ("report", models.JSONField(help_text="The gate report (cxr_flows.gate.decide)")),
+                ("report", models.JSONField(help_text="The gate report (cxr_flows.gating.decide)")),
                 (
                     "report_uri",
                     models.CharField(

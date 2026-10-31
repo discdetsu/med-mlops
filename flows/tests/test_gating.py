@@ -8,7 +8,7 @@ import pydantic
 import pytest
 
 from cxr_flows.config import GateConfig, load_gate_config
-from cxr_flows.gate import Scored, decide, render_html
+from cxr_flows.gating import Scored, decide, render_html, version_tags
 
 CLASSES = ("A", "B", "C")
 N = 1200
@@ -126,6 +126,40 @@ def test_small_subgroups_are_reported_but_not_judged() -> None:
                     Scored("2", p, True))  # fmt: skip
     ap = _subgroup(report, "view", "AP")
     assert ap["n"] == N // 2 and not ap["judged"] and ap["passed"]
+
+
+def test_a_large_subgroup_without_a_delta_fails_the_gate() -> None:
+    """No AP image has any finding, so no AUROC is defined there: the gate can't show the
+    challenger is fine on 600 images, and must not pass them silently."""
+    y, meta, rng = _data()
+    ap = (meta["view_position"] == "AP").to_numpy()
+    y[ap] = 0
+    p = _scores(y, rng, 1.0)
+
+    report = decide(_cfg(), y, meta, CLASSES, Scored("1", p, True), Scored("2", p, True))
+
+    group = _subgroup(report, "view", "AP")
+    assert group["delta"] is None and group["judged"] and not group["passed"]
+    assert not _checks(report)["subgroups"] and not report["passed"]
+    assert "view=AP (no ΔAUROC, n=600)" in report["checks"][2]["detail"]
+    render_html(report)
+
+
+def test_version_tags_carry_the_verdict() -> None:
+    y, meta, rng = _data()
+    p = _scores(y, rng, 1.0)
+    report = decide(_cfg(), y, meta, CLASSES, Scored("1", p, True), Scored("2", p, True))
+
+    tags = version_tags(report, "s3://artifacts/x.html")
+    assert tags == {
+        "gate_passed": "true",
+        "gate_champion_version": "1",
+        "gate_macro_delta_auroc": "+0.0000",
+        "gate_report_uri": "s3://artifacts/x.html",
+    }
+
+    report["macro_auroc"]["delta"] = None  # no class with both positives and negatives
+    assert version_tags(report, "s3://artifacts/x.html")["gate_macro_delta_auroc"] == "n/a"
 
 
 def test_failed_parity_fails_the_gate_unless_not_required() -> None:

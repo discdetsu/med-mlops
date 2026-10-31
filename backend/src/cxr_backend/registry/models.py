@@ -35,7 +35,7 @@ class ModelCandidate(models.Model):
     auto_promote = models.BooleanField(
         db_default=False, help_text="Set by the gate when gate.yaml has auto_promote on"
     )
-    report = models.JSONField(help_text="The gate report (cxr_flows.gate.decide)")
+    report = models.JSONField(help_text="The gate report (cxr_flows.gating.decide)")
     report_uri = models.CharField(max_length=512, help_text="HTML gate report in object storage")
     mlflow_run_id = models.CharField(max_length=64, blank=True)
     dataset_rev = models.CharField(max_length=64, blank=True)

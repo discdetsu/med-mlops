@@ -57,6 +57,8 @@ class FakeMlflow:
         self.aliases: dict[str, str] = {}
         self.artifacts: dict[str, bytes] = {}
         self.run_status: str | None = None
+        # ("set" | "delete", alias) pairs whose next call raises, as a flaky server would.
+        self.fail: set[tuple[str, str]] = set()
         if champion is not None:
             self.versions[champion] = {
                 "bundle_uri": f"s3://artifacts/models/cxr-classifier/{champion}/"
@@ -110,10 +112,17 @@ class FakeMlflow:
         self.versions[version][key] = value
 
     def set_registered_model_alias(self, name: str, alias: str, version: str) -> None:
+        self._maybe_fail("set", alias)
         self.aliases[alias] = version
 
     def delete_registered_model_alias(self, name: str, alias: str) -> None:
+        self._maybe_fail("delete", alias)
         del self.aliases[alias]
+
+    def _maybe_fail(self, op: str, alias: str) -> None:
+        if (op, alias) in self.fail:
+            self.fail.discard((op, alias))
+            raise MlflowException(f"injected failure: {op} @{alias}")
 
     def set_terminated(self, run_id: str, status: str = "FINISHED") -> None:
         self.run_status = status

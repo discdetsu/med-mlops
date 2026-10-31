@@ -2,7 +2,7 @@
 {% comment %}Candidates, the current aliases, and the rollback button.{% endcomment %}
 
 {% block object-tools-items %}
-  {% if can_promote and registry.previous %}
+  {% if can_promote and can_roll_back %}
     <li><a href="{% url 'admin:registry_modelcandidate_rollback' %}">Roll back @champion to version {{ registry.previous }}</a></li>
   {% endif %}
   {{ block.super }}

@@ -6,6 +6,7 @@ Candidates are read-only here; only `registry.promotion` changes them. The butto
 """
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -225,12 +226,9 @@ class ModelCandidateAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     def rollback_view(self, request: HttpRequest) -> HttpResponse:
         self._require_promote(request)
         state = self._state_or_none(request)
-        if state is None:
-            blocker: str | None = "the model registry is unavailable"
-        elif state.previous is None:
-            blocker = "@previous is unset (an approval sets it, a rollback clears it)"
-        else:
-            blocker = None
+        blocker = (
+            promotion.rollback_blocker(state) if state else "the model registry is unavailable"
+        )
         champion, previous = (state.champion, state.previous) if state else (None, None)
         return self._decision_page(
             request,
@@ -277,7 +275,7 @@ class ModelCandidateAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         blocker: str | None,
         consequence: str,
         submit: str,
-        act: Any,
+        act: Callable[[str], promotion.Decision],
         done: str,
     ) -> HttpResponse:
         back = (
@@ -331,9 +329,11 @@ class ModelCandidateAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             return None
 
     def _registry_context(self, request: HttpRequest) -> dict[str, Any]:
+        state = self._state_or_none(request)
         return {
-            "registry": self._state_or_none(request),
+            "registry": state,
             "can_promote": request.user.has_perm(PROMOTE_PERMISSION),
+            "can_roll_back": state is not None and promotion.rollback_blocker(state) is None,
         }
 
 
@@ -371,7 +371,7 @@ def _user(request: HttpRequest) -> User:
 
 
 def render_report(report: dict[str, Any]) -> SafeString:
-    """The gate report (cxr_flows.gate.decide) as admin HTML; every value is escaped."""
+    """The gate report (cxr_flows.gating.decide) as admin HTML; every value is escaped."""
     if not report:
         return format_html("{}", "no report")
     pct = f"{report.get('config', {}).get('confidence', 0.95):.0%}"

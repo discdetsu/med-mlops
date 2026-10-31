@@ -5,7 +5,8 @@
 # auto_promote is on.
 
 # Non-inferiority margin. Passes when the lower CI bound of macro ΔAUROC is >= -margin and
-# no subgroup (sex, view, age band) has a macro ΔAUROC point estimate below -margin.
+# no subgroup (sex, view, age band) has a macro ΔAUROC point estimate below -margin (or
+# none at all, when no class has both positives and negatives in it).
 margin: 0.02
 confidence: 0.95
 bootstrap_samples: 1000
@@ -14,7 +15,7 @@ min_subgroup_size: 100   # smaller subgroups are reported, not judged
 max_ece_increase: 0.01
 require_parity: true     # the challenger's E2E parity (ONNX vs PyTorch) must have passed
 # Promote without a person when the gate passes: `make train` runs `promote --auto` after
-# the flow. For the scripted demo only (Phase 5).
+# the flow, which approves @challenger if it is marked. For the scripted demo only (Phase 5).
 auto_promote: false
 batch_size: 64           # ONNX Runtime batch for scoring the test set
 seed: 0

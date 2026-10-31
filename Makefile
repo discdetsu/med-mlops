@@ -90,11 +90,12 @@ backend_cmd := $(COMPOSE) run --rm --no-deps backend python -m cxr_backend
 
 train:  ## Train → evaluate → ONNX → parity → reference → @challenger → gate (CONFIG=demo|full)
 	uv run python -m cxr_flows.train --config $(CONFIG) $(TRAIN_ARGS)
-	@# A no-op unless gate.yaml has auto_promote on and the gate passed.
+	@# Approves @challenger, the version just trained, only if gate.yaml has auto_promote on
+	@# and the gate passed it; otherwise a no-op.
 	$(backend_cmd) promote --auto
 
 gate:  ## Gate @challenger (or VERSION=N) against @champion; the result waits in Django admin
-	uv run python -m cxr_flows.promotion $(if $(VERSION),--version $(VERSION)) $(GATE_ARGS)
+	uv run python -m cxr_flows.gate $(if $(VERSION),--version $(VERSION)) $(GATE_ARGS)
 
 promote:  ## Approve a gated candidate without the admin (VERSION=N REASON="...")
 	@test -n "$(VERSION)" -a -n "$(REASON)" || { echo 'usage: make promote VERSION=N REASON="..."'; exit 2; }

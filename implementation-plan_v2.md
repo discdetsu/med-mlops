@@ -136,7 +136,7 @@ This is the milestone the showcase needs: fresh clone → `make up` → `make se
 
 `@challenger` replaces `@champion` only when it is not worse on the locked test set in a paired comparison and someone approves it in Django admin. All workers then switch to vN without dropping jobs.
 
-- [x] Gate task: a separate `promotion` flow that the end of the `train` flow calls (`make gate VERSION=N` re-runs it); runs champion and challenger through their ONNX bundles on the same locked test set
+- [x] Gate task: a separate `gate` flow that the end of the `train` flow calls (`make gate VERSION=N` re-runs it); runs champion and challenger through their ONNX bundles on the same locked test set
 - [x] Paired bootstrap CI of ΔAUROC per class and macro, resampling patients; passes when the lower bound of macro ΔAUROC is not below −margin and no subgroup gets worse by more than the margin (point estimate, n ≥ `min_subgroup_size`)
 - [x] Other gate conditions: parity passed and ECE no worse than a set limit; all values live in `gate.yaml`
 - [x] Gate report (JSON + HTML) to artifacts, with status in `model_candidates` (Django-owned, see ADR 0007)

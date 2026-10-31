@@ -6,13 +6,16 @@ pointed at vN; then `model.events` tells every worker to load vN. Rollback: `@ch
 `@previous`, and `@previous` is cleared, so a second rollback needs another approval first.
 
 Registry changes are serialized with a Postgres advisory lock, so two admins clicking at once
-can't interleave alias moves. Workers are told only after the database commit; if that publish
-fails, the aliases have still moved, and workers pick the change up when they reconnect or
-restart (they ask `/internal/champion` then).
+can't interleave alias moves. Each action writes its database rows first and moves the aliases
+last, inside the same transaction: a failed alias move rolls the rows back, and a failed commit
+puts the aliases back, so MLflow and `model_approvals` agree. Dropping `@challenger`, the
+`promotion_status` tag, and telling the workers happen after the commit and are best-effort; if
+the publish fails, workers pick the change up when they reconnect or restart (they ask
+`/internal/champion` then).
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -30,7 +33,15 @@ from cxr_backend.registry.champion import (
 from cxr_backend.registry.events import publish_champion_changed
 from cxr_backend.registry.models import ModelApproval, ModelCandidate
 from cxr_core.messaging import ChampionChanged
-from cxr_core.registry import CHALLENGER_ALIAS, CHAMPION_ALIAS, MODEL_NAME, PREVIOUS_ALIAS
+from cxr_core.registry import (
+    CHALLENGER_ALIAS,
+    CHAMPION_ALIAS,
+    MODEL_NAME,
+    PREVIOUS_ALIAS,
+    STATUS_APPROVED,
+    STATUS_REJECTED,
+    STATUS_ROLLED_BACK,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +94,21 @@ def approval_blocker(candidate: ModelCandidate, champion: str | None) -> str | N
     return None
 
 
+def rollback_blocker(state: RegistryState) -> str | None:
+    """Why `@champion` can't be rolled back right now, or None if it can."""
+    if state.champion is None or state.previous is None:
+        return (
+            f"nothing to roll back to: @{PREVIOUS_ALIAS} is unset (it is set by an approval "
+            "and cleared by a rollback)"
+        )
+    if state.previous == state.champion:
+        return (
+            f"@{PREVIOUS_ALIAS} is version {state.previous}, which is already @{CHAMPION_ALIAS}; "
+            "a rollback would change nothing"
+        )
+    return None
+
+
 def approve(
     candidate_id: int,
     *,
@@ -93,34 +119,39 @@ def approve(
 ) -> Decision:
     reason = _require_reason(reason)
     client = client or mlflow_client()
-    with transaction.atomic(), _registry_lock():
-        candidate = ModelCandidate.objects.select_for_update().get(pk=candidate_id)
-        champion = alias_version(client, CHAMPION_ALIAS)
-        if blocker := approval_blocker(candidate, champion):
-            raise PromotionError(f"version {candidate.model_version} can't be approved: {blocker}")
-        assert champion is not None  # approval_blocker checked it equals the gated champion
-        version = candidate.model_version
+    undo: Callable[[], None] | None = None
+    try:
+        with transaction.atomic(), _registry_lock():
+            candidate = ModelCandidate.objects.select_for_update().get(pk=candidate_id)
+            champion = alias_version(client, CHAMPION_ALIAS)
+            if blocker := approval_blocker(candidate, champion):
+                raise PromotionError(
+                    f"version {candidate.model_version} can't be approved: {blocker}"
+                )
+            assert champion is not None  # approval_blocker checked it equals the gated champion
+            version = candidate.model_version
 
-        client.set_registered_model_alias(MODEL_NAME, PREVIOUS_ALIAS, champion)
-        if alias_version(client, CHALLENGER_ALIAS) == version:
-            client.delete_registered_model_alias(MODEL_NAME, CHALLENGER_ALIAS)
-        # The switch, and the last MLflow call allowed to fail: only database writes follow.
-        client.set_registered_model_alias(MODEL_NAME, CHAMPION_ALIAS, version)
-        _tag_status(client, version, "approved")
-
-        candidate.status = ModelCandidate.Status.APPROVED
-        candidate.decided_at = timezone.now()
-        candidate.save(update_fields=["status", "decided_at"])
-        approval = ModelApproval.objects.create(
-            candidate=candidate,
-            action=ModelApproval.Action.APPROVE,
-            model_name=candidate.model_name,
-            from_version=champion,
-            to_version=version,
-            user=user,
-            actor=_actor(user, actor),
-            reason=reason,
-        )
+            candidate.status = ModelCandidate.Status.APPROVED
+            candidate.decided_at = timezone.now()
+            candidate.save(update_fields=["status", "decided_at"])
+            approval = ModelApproval.objects.create(
+                candidate=candidate,
+                action=ModelApproval.Action.APPROVE,
+                model_name=candidate.model_name,
+                from_version=champion,
+                to_version=version,
+                user=user,
+                actor=_actor(user, actor),
+                reason=reason,
+            )
+            # Last, so a failure here rolls the rows above back.
+            undo = _move_aliases(client, champion=version, previous=champion)
+    except Exception:
+        if undo is not None:  # the aliases moved but the commit failed
+            undo()
+        raise
+    _drop_challenger(client, version)
+    _tag_status(client, version, STATUS_APPROVED)
     _announce(client, approval)
     logger.info("version %s approved by %s; was %s", version, approval.actor, champion)
     return Decision(approval)
@@ -147,10 +178,6 @@ def reject(
             )
         version = candidate.model_version
         champion = alias_version(client, CHAMPION_ALIAS) or ""
-        if alias_version(client, CHALLENGER_ALIAS) == version:
-            client.delete_registered_model_alias(MODEL_NAME, CHALLENGER_ALIAS)
-        _tag_status(client, version, "rejected")
-
         candidate.status = ModelCandidate.Status.REJECTED
         candidate.decided_at = timezone.now()
         candidate.save(update_fields=["status", "decided_at"])
@@ -164,6 +191,8 @@ def reject(
             actor=_actor(user, actor),
             reason=reason,
         )
+    _drop_challenger(client, version)
+    _tag_status(client, version, STATUS_REJECTED)
     logger.info("version %s rejected by %s", version, approval.actor)
     return Decision(approval)
 
@@ -178,57 +207,61 @@ def rollback(
     """`@champion` back to `@previous`; the rolled-back version's candidate is marked so."""
     reason = _require_reason(reason)
     client = client or mlflow_client()
-    with transaction.atomic(), _registry_lock():
-        champion = alias_version(client, CHAMPION_ALIAS)
-        previous = alias_version(client, PREVIOUS_ALIAS)
-        if champion is None or previous is None:
-            raise PromotionError(
-                f"nothing to roll back to: @{PREVIOUS_ALIAS} is unset (it is set by an approval "
-                "and cleared by a rollback)"
-            )
-        # The switch, and the last MLflow call allowed to fail: only database writes follow.
-        client.set_registered_model_alias(MODEL_NAME, CHAMPION_ALIAS, previous)
-        try:
-            client.delete_registered_model_alias(MODEL_NAME, PREVIOUS_ALIAS)
-        except Exception:
-            # @previous now equals @champion, so another rollback would be a no-op swap.
-            logger.exception("couldn't clear @%s after rolling back", PREVIOUS_ALIAS)
-        _tag_status(client, champion, "rolled_back")
+    undo: Callable[[], None] | None = None
+    try:
+        with transaction.atomic(), _registry_lock():
+            state = registry_state(client)
+            if blocker := rollback_blocker(state):
+                raise PromotionError(blocker)
+            champion, previous = state.champion, state.previous
+            assert champion is not None and previous is not None  # rollback_blocker checked
 
-        candidate = (
-            ModelCandidate.objects.select_for_update()
-            .filter(model_name=MODEL_NAME, model_version=champion)
-            .first()
-        )
-        if candidate is not None:
-            candidate.status = ModelCandidate.Status.ROLLED_BACK
-            candidate.decided_at = timezone.now()
-            candidate.save(update_fields=["status", "decided_at"])
-        approval = ModelApproval.objects.create(
-            candidate=candidate,
-            action=ModelApproval.Action.ROLLBACK,
-            model_name=MODEL_NAME,
-            from_version=champion,
-            to_version=previous,
-            user=user,
-            actor=_actor(user, actor),
-            reason=reason,
-        )
+            candidate = (
+                ModelCandidate.objects.select_for_update()
+                .filter(model_name=MODEL_NAME, model_version=champion)
+                .first()
+            )
+            if candidate is not None:
+                candidate.status = ModelCandidate.Status.ROLLED_BACK
+                candidate.decided_at = timezone.now()
+                candidate.save(update_fields=["status", "decided_at"])
+            approval = ModelApproval.objects.create(
+                candidate=candidate,
+                action=ModelApproval.Action.ROLLBACK,
+                model_name=MODEL_NAME,
+                from_version=champion,
+                to_version=previous,
+                user=user,
+                actor=_actor(user, actor),
+                reason=reason,
+            )
+            # Last, so a failure here rolls the rows above back.
+            undo = _move_aliases(client, champion=previous, previous=None)
+    except Exception:
+        if undo is not None:  # the aliases moved but the commit failed
+            undo()
+        raise
+    _tag_status(client, champion, STATUS_ROLLED_BACK)
     _announce(client, approval)
     logger.info("rolled back from %s to %s by %s", champion, previous, approval.actor)
     return Decision(approval)
 
 
-def auto_promote(client: MlflowClient | None = None) -> Decision | None:
-    """Approve the newest candidate the gate passed with `auto_promote` on (gate.yaml), if it
-    is still pending and was gated against the current champion. None if there is none."""
-    candidate = (
-        ModelCandidate.objects.filter(
-            status=ModelCandidate.Status.PENDING, gate_passed=True, auto_promote=True
-        )
-        .order_by("-gated_at")
-        .first()
-    )
+def auto_promote(version: str | None = None, client: MlflowClient | None = None) -> Decision | None:
+    """Approve `version` (default: `@challenger`, the version the last train run registered)
+    if the gate passed it with `auto_promote` on (gate.yaml) and it is still pending. None if
+    it isn't marked, so an older marked candidate is never promoted in its place."""
+    client = client or mlflow_client()
+    version = version or alias_version(client, CHALLENGER_ALIAS)
+    if version is None:
+        return None
+    candidate = ModelCandidate.objects.filter(
+        model_name=MODEL_NAME,
+        model_version=version,
+        status=ModelCandidate.Status.PENDING,
+        gate_passed=True,
+        auto_promote=True,
+    ).first()
     if candidate is None:
         return None
     return approve(
@@ -257,6 +290,50 @@ def _announce(client: MlflowClient, approval: ModelApproval) -> None:
         return
     approval.event_published = True
     approval.save(update_fields=["event_published"])
+
+
+def _move_aliases(
+    client: MlflowClient, *, champion: str, previous: str | None
+) -> Callable[[], None]:
+    """Point `@champion` at `champion`, then `@previous` at `previous` (None clears it).
+
+    Either both move or neither does: if the second move fails, the first is put back before
+    the error propagates. Returns a function that puts both back, for a caller whose commit
+    fails after this succeeded."""
+    before = {alias: alias_version(client, alias) for alias in (CHAMPION_ALIAS, PREVIOUS_ALIAS)}
+
+    def undo() -> None:
+        for alias, version in before.items():
+            try:
+                _point_alias(client, alias, version)
+            except Exception:
+                logger.exception(
+                    "couldn't put @%s back to version %s; set it by hand in MLflow", alias, version
+                )
+
+    client.set_registered_model_alias(MODEL_NAME, CHAMPION_ALIAS, champion)
+    try:
+        _point_alias(client, PREVIOUS_ALIAS, previous)
+    except Exception:
+        undo()
+        raise
+    return undo
+
+
+def _point_alias(client: MlflowClient, alias: str, version: str | None) -> None:
+    if version is not None:
+        client.set_registered_model_alias(MODEL_NAME, alias, version)
+    elif alias_version(client, alias) is not None:
+        client.delete_registered_model_alias(MODEL_NAME, alias)
+
+
+def _drop_challenger(client: MlflowClient, version: str) -> None:
+    """Clear `@challenger` if it still points at `version`; cleanup, so never fatal."""
+    try:
+        if alias_version(client, CHALLENGER_ALIAS) == version:
+            client.delete_registered_model_alias(MODEL_NAME, CHALLENGER_ALIAS)
+    except Exception:
+        logger.exception("couldn't clear @%s from version %s", CHALLENGER_ALIAS, version)
 
 
 def _tag_status(client: MlflowClient, version: str, status: str) -> None:

@@ -1,6 +1,6 @@
 """Prefect `train` flow: validate → build dataset (pinned DVC rev) → train → evaluate →
 export ONNX → E2E parity → build reference → register as `@challenger` → promotion gate
-against `@champion` (the `promotion` flow).
+against `@champion` (the `gate` flow).
 
     uv run python -m cxr_flows.train [--config demo|full|path.yaml] [--dataset-rev REV]
                                      [--no-register] [--no-gate]
@@ -32,7 +32,7 @@ from cxr_flows.config import TrainConfig, load_config
 from cxr_flows.dataset import Split, load_split
 from cxr_flows.evaluate import choose_thresholds, evaluate, render_html
 from cxr_flows.export import ParityReport, export_onnx, run_parity
-from cxr_flows.promotion import promotion_flow
+from cxr_flows.gate import gate_flow
 from cxr_flows.reference import build_reference, write_reference
 from cxr_flows.registry import register
 from cxr_flows.schema import CLASSES, read_metadata, validate_versioned
@@ -269,7 +269,7 @@ def train_flow(
         )
     logger.info("registered %s version %s as @challenger", MODEL_NAME, version)
     if gate:
-        promotion_flow(version=version)
+        gate_flow(version=version)
     return version
 
 

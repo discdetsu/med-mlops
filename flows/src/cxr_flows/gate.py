@@ -1,260 +1,222 @@
-"""The promotion gate's decision: may `@challenger` replace `@champion`? (ADR 0007)
+"""Prefect `gate` flow: gate `@challenger` (or a given version) against `@champion` on the
+locked test set, publish the gate report, and record the version as a candidate that a person
+approves or rejects in Django admin (ADR 0007).
 
-Both versions have scored the same locked test set (promotion.py does the I/O). A paired
-bootstrap over patients gives a CI for each AUROC difference, challenger - champion. The gate
-passes when every check in `checks` passes:
+    uv run python -m cxr_flows.gate [--version N] [--config gate|path.yaml]
 
-- `parity`: the challenger passed E2E parity (ONNX vs PyTorch), when `require_parity` is on.
-- `macro_auroc`: the lower CI bound of macro ΔAUROC is not below -margin (non-inferiority).
-- `subgroups`: no subgroup with n >= `min_subgroup_size` has a macro ΔAUROC point estimate
-  below -margin. Subgroup CIs are reported but not judged: they are wide enough that a
-  non-inferiority test per subgroup would reject almost any retrain.
-- `ece`: pooled ECE rises by at most `max_ece_increase`.
+The train flow runs it after registering a version. Run it by hand (`make gate`) to re-gate a
+candidate after `@champion` moved: approval refuses a candidate gated against another champion.
 
-Passing makes the version a candidate; a person still approves it in Django admin.
+Both versions are scored the way serving scores them: `cxr_core.preprocess` from the raw
+files (cached tensors) → each version's own ONNX model through `cxr_core.inference`.
 """
 
-import html
-import math
-from collections.abc import Sequence
+import argparse
+import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import boto3
 import numpy as np
-import numpy.typing as npt
+import onnxruntime as ort
 import pandas as pd
+from mlflow import MlflowClient
+from prefect import flow, get_run_logger, runtime, task
+from prefect.cache_policies import NO_CACHE
 
-from cxr_core.metrics import expected_calibration_error, paired_bootstrap_auroc
-from cxr_flows.config import GateConfig
-from cxr_flows.evaluate import fmt, fmt_ci, html_page, subgroup_masks
+from cxr_core.bundle import MANIFEST_FILE, ONNX_FILE, Manifest
+from cxr_core.inference import run_onnx, sigmoid
+from cxr_core.preprocess import PREPROCESS_VERSION
+from cxr_core.registry import (
+    CHALLENGER_ALIAS,
+    CHAMPION_ALIAS,
+    MODEL_NAME,
+    bundle_uri,
+    gate_report_prefix,
+    split_s3_uri,
+)
+from cxr_flows import db
+from cxr_flows.config import load_gate_config
+from cxr_flows.dataset import Split, load_split
+from cxr_flows.gating import Scored, decide, render_html, version_tags
+from cxr_flows.registry import alias_version
+from cxr_flows.schema import CLASSES, read_metadata, validate_dataset
+from cxr_flows.settings import Paths, app_database_url, require_mlflow_tracking_uri
+from cxr_flows.versioning import dvc_md5, ensure_pinned
 
-Array = npt.NDArray[np.floating[Any]]
+ADMIN_CANDIDATES_URL = "http://localhost:8000/admin/registry/modelcandidate/"
+
+
+class GateError(RuntimeError):
+    """The gate can't compare the two versions (as opposed to a comparison that fails)."""
 
 
 @dataclass(frozen=True)
-class Scored:
-    """One model version's probabilities on the gate's test set, rows in the same order."""
-
-    version: str
-    probabilities: Array  # (N, K)
-    parity_passed: bool
+class LockedTest:
+    meta: pd.DataFrame
+    md5: str
 
 
-def decide(
-    cfg: GateConfig,
-    y: Array,
-    meta: pd.DataFrame,
-    classes: Sequence[str],
-    champion: Scored,
-    challenger: Scored,
-) -> dict[str, Any]:
-    """The gate report: decision, checks, and every number they rest on (JSON-safe)."""
-    n = len(meta)
-    if y.shape != (n, len(classes)):
-        raise ValueError(f"labels {y.shape} don't match {n} rows and {len(classes)} classes")
-    for scored in (champion, challenger):
-        if scored.probabilities.shape != y.shape:
-            raise ValueError(
-                f"version {scored.version}: probabilities {scored.probabilities.shape}, "
-                f"labels {y.shape}"
-            )
+@dataclass(frozen=True)
+class GateOutcome:
+    model_version: str
+    champion_version: str
+    passed: bool
+    report_uri: str
 
-    masks = subgroup_masks(meta)
-    groups = {"all": np.ones(n, dtype=bool)} | {
-        _group_key(attr, value): m for attr, values in masks.items() for value, m in values.items()
-    }
-    paired = paired_bootstrap_auroc(
-        y,
-        champion.probabilities,
-        challenger.probabilities,
-        n_boot=cfg.bootstrap_samples,
-        seed=cfg.seed,
-        groups=groups,
-        clusters=meta["patient_id"].to_numpy(),
+
+@task(cache_policy=NO_CACHE)
+def load_locked_test(paths: Paths) -> LockedTest:
+    """The pinned test_locked metadata. `ensure_pinned` already proves the files are the
+    pinned ones, so the schema check skips opening 16k images."""
+    ensure_pinned(paths.root, [paths.test_locked])
+    meta = validate_dataset(read_metadata(paths.test_locked), ("test_locked",))
+    return LockedTest(meta, dvc_md5(paths.test_locked))
+
+
+@task(cache_policy=NO_CACHE)
+def score_version(
+    client: MlflowClient, version: str, test: LockedTest, paths: Paths, batch_size: int, work: Path
+) -> tuple[Scored, Split]:
+    """Download the version's bundle and score the locked test set with its ONNX model."""
+    mv = client.get_model_version(MODEL_NAME, version)
+    bucket, prefix = split_s3_uri(mv.tags.get("bundle_uri") or bundle_uri(MODEL_NAME, version))
+    dest = work / f"v{version}"
+    dest.mkdir()
+    s3 = boto3.client("s3")
+    for name in (MANIFEST_FILE, ONNX_FILE):
+        s3.download_file(bucket, prefix + name, str(dest / name))
+    manifest = Manifest.load(dest)
+    if manifest.classes != CLASSES:
+        raise GateError(f"version {version} predicts {manifest.classes}, the gate needs {CLASSES}")
+    if manifest.preprocess_version != PREPROCESS_VERSION:
+        raise GateError(
+            f"version {version} needs preprocess_version {manifest.preprocess_version}, this code "
+            f"is {PREPROCESS_VERSION}; serving would refuse it too"
+        )
+
+    split = load_split(
+        test.meta, paths.test_locked, test.md5, "test_locked", manifest.image_size, paths.cache
     )
-    overall = paired["all"]
-    tail = 100 * (1 - cfg.confidence) / 2
-    margin = cfg.margin
+    session = ort.InferenceSession(str(dest / ONNX_FILE), providers=["CPUExecutionProvider"])
+    probs = np.concatenate(
+        [
+            sigmoid(run_onnx(session, np.ascontiguousarray(split.x[i : i + batch_size]))[0])
+            for i in range(0, len(split), batch_size)
+        ]
+    )
+    get_run_logger().info(
+        "version %s (%s, %d px) scored %d images", version, manifest.architecture,
+        manifest.image_size, len(split),
+    )  # fmt: skip
+    return Scored(version, probs, parity_passed=mv.tags.get("parity_passed") == "true"), split
 
-    def ci(values: Array) -> list[float] | None:
-        finite = values[np.isfinite(values)]
-        if finite.size == 0:
-            return None
-        lo, hi = np.percentile(finite, [tail, 100 - tail])
-        return [float(lo), float(hi)]
 
-    macro_ci = ci(overall.boot_macro_delta)
-    macro = {
-        **_pair(overall.a, overall.b),
-        "delta": _num(overall.macro_delta),
-        "delta_ci": macro_ci,
+@task(cache_policy=NO_CACHE)
+def publish_report(
+    client: MlflowClient, report: dict[str, Any], run_id: str | None, work: Path
+) -> str:
+    """JSON + HTML next to the version's bundle in S3, and in its MLflow run under `gate/`.
+    Returns the S3 URI of the HTML report, which Django admin links to."""
+    challenger, champion = report["challenger_version"], report["champion_version"]
+    out = work / "gate"
+    out.mkdir()
+    stem = f"vs-champion-v{champion}"
+    files = {
+        out / f"{stem}.json": ("application/json", json.dumps(report, indent=2) + "\n"),
+        out / f"{stem}.html": ("text/html; charset=utf-8", render_html(report)),
     }
-    # Lists, not dicts keyed by name: Postgres jsonb doesn't keep key order.
-    per_class = [
-        {
-            "class": c,
-            "champion": _num(overall.a[j]),
-            "challenger": _num(overall.b[j]),
-            "delta": _num(overall.delta[j]),
-            "delta_ci": ci(overall.boot_delta[:, j]),
+    s3 = boto3.client("s3")
+    bucket, _ = split_s3_uri(bundle_uri(MODEL_NAME, challenger))
+    key_prefix = gate_report_prefix(MODEL_NAME, challenger)
+    for path, (content_type, text) in files.items():
+        path.write_text(text)
+        s3.upload_file(str(path), bucket, key_prefix + path.name, {"ContentType": content_type})
+        if run_id:
+            client.log_artifact(run_id, str(path), artifact_path="gate")
+    return f"s3://{bucket}/{key_prefix}{stem}.html"
+
+
+@flow(name="gate", log_prints=True)
+def gate_flow(version: str | None = None, config: str = "gate") -> GateOutcome | None:
+    """Gate `version` (default: `@challenger`). None when there is nothing to compare."""
+    cfg = load_gate_config(config)
+    logger = get_run_logger()
+    client = MlflowClient(require_mlflow_tracking_uri())
+
+    champion = alias_version(client, MODEL_NAME, CHAMPION_ALIAS)
+    challenger = version or alias_version(client, MODEL_NAME, CHALLENGER_ALIAS)
+    if challenger is None:
+        raise GateError(f"no version given and no @{CHALLENGER_ALIAS}; run `make train` first")
+    if champion is None:
+        logger.warning(
+            "no @%s to compare version %s with; `make seed-model` or `make bootstrap-champion` "
+            "sets the first one", CHAMPION_ALIAS, challenger,
+        )  # fmt: skip
+        return None
+    if champion == challenger:
+        logger.info("version %s is already @%s; nothing to gate", challenger, CHAMPION_ALIAS)
+        return None
+
+    mv = client.get_model_version(MODEL_NAME, challenger)
+    paths = Paths.discover()
+    test = load_locked_test(paths)
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        champion_scores, _ = score_version(client, champion, test, paths, cfg.batch_size, work)
+        challenger_scores, split = score_version(
+            client, challenger, test, paths, cfg.batch_size, work
+        )
+        report = decide(cfg, split.y, split.meta, CLASSES, champion_scores, challenger_scores)
+        report |= {
+            "model_name": MODEL_NAME,
+            "test_locked_md5": test.md5,
+            "prefect_flow_run_id": str(runtime.flow_run.id or ""),
         }
-        for j, c in enumerate(classes)
-    ]
+        report_uri = publish_report(client, report, mv.run_id, work)
 
-    subgroups: list[dict[str, Any]] = []
-    for attr, values in masks.items():
-        for value in values:
-            g = paired[_group_key(attr, value)]
-            delta = _num(g.macro_delta)
-            judged = g.n >= cfg.min_subgroup_size and delta is not None
-            subgroups.append(
-                {
-                    "attribute": attr,
-                    "value": value,
-                    "n": g.n,
-                    **_pair(g.a, g.b),
-                    "delta": delta,
-                    "delta_ci": ci(g.boot_macro_delta),
-                    "judged": judged,
-                    "passed": (not judged) or (delta is not None and delta >= -margin),
-                }
-            )
-
-    ece_champion = expected_calibration_error(y, champion.probabilities)
-    ece_challenger = expected_calibration_error(y, challenger.probabilities)
-    ece_increase = ece_challenger - ece_champion
-
-    lower = macro_ci[0] if macro_ci else None
-    failing = [
-        f"{s['attribute']}={s['value']} ({s['delta']:+.4f}, n={s['n']})"
-        for s in subgroups
-        if not s["passed"]
-    ]
-    judged_count = sum(s["judged"] for s in subgroups)
-    pct = f"{cfg.confidence:.0%}"
-    checks = [
-        {
-            "name": "parity",
-            "passed": challenger.parity_passed or not cfg.require_parity,
-            "detail": (
-                "E2E parity passed"
-                if challenger.parity_passed
-                else "E2E parity did not pass"
-                + ("" if cfg.require_parity else " (not required: require_parity is off)")
-            ),
-        },
-        {
-            "name": "macro_auroc",
-            "passed": lower is not None and lower >= -margin,
-            "detail": (
-                f"lower {pct} bound of macro ΔAUROC is {lower:+.4f}, needs ≥ {-margin:+.4f}"
-                if lower is not None
-                else "macro ΔAUROC has no CI: no class had both positives and negatives"
-            ),
-        },
-        {
-            "name": "subgroups",
-            "passed": not failing,
-            "detail": (
-                f"below {-margin:+.4f}: " + ", ".join(failing)
-                if failing
-                else f"{judged_count} subgroups with n ≥ {cfg.min_subgroup_size} are all "
-                f"within {-margin:+.4f}"
-            ),
-        },
-        {
-            "name": "ece",
-            "passed": math.isfinite(ece_increase) and ece_increase <= cfg.max_ece_increase,
-            "detail": (
-                f"pooled ECE {ece_champion:.4f} → {ece_challenger:.4f} "
-                f"({ece_increase:+.4f}, limit +{cfg.max_ece_increase:.4f})"
-            ),
-        },
-    ]
-
-    return {
-        "passed": all(c["passed"] for c in checks),
-        "champion_version": champion.version,
-        "challenger_version": challenger.version,
-        "n": n,
-        "n_patients": int(meta["patient_id"].nunique()),
-        "checks": checks,
-        "macro_auroc": macro,
-        "classes": per_class,
-        "subgroups": subgroups,
-        "ece": {
-            "champion": _num(ece_champion),
-            "challenger": _num(ece_challenger),
-            "delta": _num(ece_increase),
-        },
-        "config": cfg.model_dump(),
-    }
-
-
-def render_html(report: dict[str, Any]) -> str:
-    champion, challenger = report["champion_version"], report["challenger_version"]
-    verdict = "PASSED" if report["passed"] else "FAILED"
-    title = f"Promotion gate: version {challenger} vs @champion version {champion}"
-    pct = f"{report['config']['confidence']:.0%}"
-
-    check_rows = "".join(
-        f"<tr><td>{html.escape(c['name'])}</td>{_verdict_cell(c['passed'])}"
-        f"<td>{html.escape(c['detail'])}</td></tr>"
-        for c in report["checks"]
+    passed = bool(report["passed"])
+    for key, value in version_tags(report, report_uri).items():
+        client.set_model_version_tag(MODEL_NAME, challenger, key, value)
+    db.record_candidate(
+        app_database_url(),
+        model_name=MODEL_NAME,
+        model_version=challenger,
+        champion_version=champion,
+        gate_passed=passed,
+        auto_promote=cfg.auto_promote and passed,
+        report=report,
+        report_uri=report_uri,
+        mlflow_run_id=mv.run_id or "",
+        dataset_rev=mv.tags.get("dataset_rev", ""),
     )
-    m = report["macro_auroc"]
-    class_rows = "".join(
-        f"<tr><td>{html.escape(v['class'])}</td><td>{fmt(v['champion'])}</td>"
-        f"<td>{fmt(v['challenger'])}</td><td>{fmt(v['delta'], sign=True)} "
-        f"{fmt_ci(v['delta_ci'], sign=True)}</td></tr>"
-        for v in report["classes"]
-    )
-    subgroup_rows = "".join(
-        f"<tr><td>{html.escape(s['attribute'])}</td><td>{html.escape(s['value'])}</td>"
-        f"<td>{s['n']}</td><td>{fmt(s['champion'])}</td><td>{fmt(s['challenger'])}</td>"
-        f"<td>{fmt(s['delta'], sign=True)} {fmt_ci(s['delta_ci'], sign=True)}</td>"
-        + (_verdict_cell(s["passed"]) if s["judged"] else "<td>not judged</td>")
-        + "</tr>"
-        for s in report["subgroups"]
-    )
-    ece = report["ece"]
-    body = (
-        f"<p class='{'pass' if report['passed'] else 'fail'}'>Gate {verdict}</p>"
-        f"<p>Locked test set: n = {report['n']} images from {report['n_patients']} patients. "
-        f"Δ = challenger - champion; {pct} CIs from a paired bootstrap over patients "
-        f"({report['config']['bootstrap_samples']} resamples).</p>"
-        "<h2>Checks</h2><table><tr><th>Check</th><th>Result</th><th>Detail</th></tr>"
-        f"{check_rows}</table>"
-        "<h2>AUROC</h2><table><tr><th>Class</th><th>Champion</th><th>Challenger</th>"
-        f"<th>Δ ({pct} CI)</th></tr>"
-        f"<tr><td><strong>macro</strong></td><td>{fmt(m['champion'])}</td>"
-        f"<td>{fmt(m['challenger'])}</td><td>{fmt(m['delta'], sign=True)} "
-        f"{fmt_ci(m['delta_ci'], sign=True)}</td></tr>{class_rows}</table>"
-        "<h2>Subgroups (macro AUROC)</h2><table><tr><th>Group</th><th>Value</th><th>n</th>"
-        f"<th>Champion</th><th>Challenger</th><th>Δ ({pct} CI)</th><th>Result</th></tr>"
-        f"{subgroup_rows}</table>"
-        f"<h2>Calibration</h2><p>Pooled ECE: champion {fmt(ece['champion'])}, "
-        f"challenger {fmt(ece['challenger'])} ({fmt(ece['delta'], sign=True)}).</p>"
-    )
-    return html_page(title, body)
+
+    for check in report["checks"]:
+        logger.info("%s %s: %s", "pass" if check["passed"] else "FAIL", check["name"],
+                    check["detail"])  # fmt: skip
+    if not passed:
+        logger.warning("version %s FAILED the gate against version %s", challenger, champion)
+    elif cfg.auto_promote:
+        logger.info("version %s passed; auto_promote is on, `promote --auto` takes it", challenger)
+    else:
+        logger.info("version %s passed; approve or reject it at %s", challenger,
+                    ADMIN_CANDIDATES_URL)  # fmt: skip
+    return GateOutcome(challenger, champion, passed, report_uri)
 
 
-def _verdict_cell(passed: bool) -> str:
-    return "<td class='pass'>pass</td>" if passed else "<td class='fail'>FAIL</td>"
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--version", help=f"model version to gate; default: @{CHALLENGER_ALIAS}")
+    parser.add_argument("--config", default="gate", help="gate config name or YAML path")
+    args = parser.parse_args()
+    outcome = gate_flow(version=args.version, config=args.config)
+    if outcome is not None:
+        verdict = "passed" if outcome.passed else "FAILED"
+        print(f"version {outcome.model_version} {verdict} the gate against version "
+              f"{outcome.champion_version}: {outcome.report_uri}")  # fmt: skip
 
 
-def _group_key(attr: str, value: str) -> str:
-    return f"{attr}={value}"
-
-
-def _pair(a: Array, b: Array) -> dict[str, float | None]:
-    """Macro AUROC of each model over the classes defined for both."""
-    defined = np.isfinite(a) & np.isfinite(b)
-    if not defined.any():
-        return {"champion": None, "challenger": None}
-    return {"champion": float(a[defined].mean()), "challenger": float(b[defined].mean())}
-
-
-def _num(value: float | np.floating[Any]) -> float | None:
-    v = float(value)
-    return None if math.isnan(v) else v
+if __name__ == "__main__":
+    main()
