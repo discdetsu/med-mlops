@@ -23,6 +23,7 @@ endif
 CONFIG ?= demo
 SEED_ARGS ?=
 TRAIN_ARGS ?=
+GATE_ARGS ?=
 
 # What `make seed-model` registers: a release URL (default) or a local path such as
 # dist/cxr-seed-bundle-v2.tar.gz from `make bootstrap-champion`. Its .sha256 must sit next to it.
@@ -36,7 +37,7 @@ seed_source := /seed/$(notdir $(SEED_BUNDLE))
 seed_mount := -v "$(abspath $(dir $(SEED_BUNDLE))):/seed:ro"
 endif
 
-.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration seed train bootstrap-champion seed-model smoke demo
+.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration seed train gate promote rollback bootstrap-champion seed-model smoke demo
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -84,8 +85,25 @@ test-integration:  ## Integration tests against the running core stack
 seed:  ## Download the NIH subset → validate → DVC add + push → Postgres (SEED_ARGS=...)
 	uv run python -m cxr_flows.ingest $(SEED_ARGS)
 
-train:  ## Train → evaluate → ONNX → parity → reference → register @challenger (CONFIG=demo|full)
+# Django runs the promotion (ADR 0007), so these go through the backend image like seed-model.
+backend_cmd := $(COMPOSE) run --rm --no-deps backend python -m cxr_backend
+
+train:  ## Train → evaluate → ONNX → parity → reference → @challenger → gate (CONFIG=demo|full)
 	uv run python -m cxr_flows.train --config $(CONFIG) $(TRAIN_ARGS)
+	@# Approves @challenger, the version just trained, only if gate.yaml has auto_promote on
+	@# and the gate passed it; otherwise a no-op.
+	$(backend_cmd) promote --auto
+
+gate:  ## Gate @challenger (or VERSION=N) against @champion; the result waits in Django admin
+	uv run python -m cxr_flows.gate $(if $(VERSION),--version $(VERSION)) $(GATE_ARGS)
+
+promote:  ## Approve a gated candidate without the admin (VERSION=N REASON="...")
+	@test -n "$(VERSION)" -a -n "$(REASON)" || { echo 'usage: make promote VERSION=N REASON="..."'; exit 2; }
+	$(backend_cmd) promote $(VERSION) --reason "$(REASON)"
+
+rollback:  ## Move @champion back to @previous (REASON="...")
+	@test -n "$(REASON)" || { echo 'usage: make rollback REASON="..."'; exit 2; }
+	$(backend_cmd) rollback --reason "$(REASON)"
 
 bootstrap-champion:  ## Make the first model @champion and build the seed bundle in dist/
 	uv run python scripts/bootstrap_champion.py

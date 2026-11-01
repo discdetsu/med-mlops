@@ -17,6 +17,8 @@ import mlflow
 import mlflow.onnx
 import onnx
 from mlflow import MlflowClient
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 
 from cxr_core.bundle import BUNDLE_FILES, Manifest
 from cxr_core.registry import ARTIFACTS_BUCKET, CHALLENGER_ALIAS, bundle_prefix, bundle_uri
@@ -72,3 +74,19 @@ def register(
         client.set_model_version_tag(model_name, version, key, value)
     client.set_registered_model_alias(model_name, CHALLENGER_ALIAS, version)
     return version
+
+
+def alias_version(client: MlflowClient, model_name: str, alias: str) -> str | None:
+    """The version holding `alias`, or None when none does (or the model doesn't exist).
+
+    Read from the registered model: MLflow answers a missing alias on an existing model with
+    INVALID_PARAMETER_VALUE, indistinguishable from a real error without parsing the message.
+    """
+    try:
+        model = client.get_registered_model(model_name)
+    except MlflowException as exc:
+        if exc.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST):
+            return None
+        raise
+    version = model.aliases.get(alias)
+    return None if version is None else str(version)

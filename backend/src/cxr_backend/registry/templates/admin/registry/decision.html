@@ -1,0 +1,32 @@
+{% extends "admin/base_site.html" %}
+{% comment %}Confirm an approve / reject / rollback, with the reason that model_approvals records.{% endcomment %}
+
+{% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }}{% endblock %}
+
+{% block breadcrumbs %}
+<ol class="breadcrumbs">
+  <li><a href="{% url 'admin:index' %}">Home</a></li>
+  <li><a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a></li>
+  <li><a href="{% url 'admin:registry_modelcandidate_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a></li>
+  {% if candidate %}<li><a href="{{ back }}">{{ candidate }}</a></li>{% endif %}
+  <li aria-current="page">{{ title }}</li>
+</ol>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% if blocker %}
+    <p class="errornote">Not possible: {{ blocker }}</p>
+    <p><a href="{{ back }}">Back</a></p>
+  {% else %}
+    <p>{{ consequence }}</p>
+    <form method="post">{% csrf_token %}
+      {{ form.as_div }}
+      <div class="submit-row">
+        <input type="submit" value="{{ submit }}">
+        <a href="{{ back }}" class="closelink">Cancel</a>
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

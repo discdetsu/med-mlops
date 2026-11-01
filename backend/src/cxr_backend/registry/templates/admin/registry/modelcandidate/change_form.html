@@ -1,0 +1,25 @@
+{% extends "admin/change_form.html" %}
+{% comment %}A candidate's page: its gate report (a read-only field) plus the decision buttons.{% endcomment %}
+
+{% block object-tools-items %}
+  {% if can_promote and original %}
+    {% if approval_blocker is None and registry %}
+      <li><a href="{% url 'admin:registry_modelcandidate_approve' original.pk %}">Approve and promote</a></li>
+    {% endif %}
+    {% if can_reject %}
+      <li><a href="{% url 'admin:registry_modelcandidate_reject' original.pk %}">Reject</a></li>
+    {% endif %}
+  {% endif %}
+  {{ block.super }}
+{% endblock %}
+
+{% block form_top %}
+  {% if registry is None %}
+    <p class="errornote">The model registry (MLflow) is unavailable, so the current @champion is unknown and nothing can be approved.</p>
+  {% elif original.status == "pending" and approval_blocker %}
+    <p class="errornote">Can't approve: {{ approval_blocker }}</p>
+  {% endif %}
+  {% if registry %}
+    <p>@champion: version {{ registry.champion|default:"unset" }} · @previous: {{ registry.previous|default:"unset" }} · @challenger: {{ registry.challenger|default:"unset" }}</p>
+  {% endif %}
+{% endblock %}

@@ -67,3 +67,15 @@ def app_database_url() -> str:
         raise RuntimeError(
             "APP_DATABASE_URL is not set; run through `make`, which builds it from .env"
         ) from None
+
+
+def require_mlflow_tracking_uri() -> str:
+    """Without it MLflow silently uses a local ./mlflow.db, an empty registry that has no
+    @champion and isn't the one serving reads."""
+    try:
+        return os.environ["MLFLOW_TRACKING_URI"]
+    except KeyError:
+        raise RuntimeError(
+            "MLFLOW_TRACKING_URI is not set; run through `make`, which points it at the stack's "
+            "MLflow"
+        ) from None

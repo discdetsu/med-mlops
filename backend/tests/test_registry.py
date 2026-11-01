@@ -3,13 +3,9 @@ import io
 import json
 import tarfile
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from django.test import Client
-from mlflow.exceptions import MlflowException
-from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST
 
 import cxr_backend.registry.api as registry_api
 import cxr_backend.registry.seed as seed_module
@@ -18,7 +14,7 @@ from cxr_backend.registry.seed import SeedError, extract, fetch, seed
 from cxr_core.bundle import BUNDLE_FILES, Manifest
 from cxr_core.messaging import ChampionChanged
 
-from .conftest import FakeS3
+from .conftest import FakeMlflow, FakeS3
 
 MANIFEST = Manifest(
     model_name="cxr-classifier",
@@ -49,63 +45,6 @@ def write_bundle(
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     Path(f"{path}.sha256").write_text(f"{digest}  {path.name}\n")
     return digest
-
-
-class FakeMlflow:
-    """The slice of MlflowClient that seed() and current_champion() use."""
-
-    def __init__(self, champion: str | None = None) -> None:
-        self.versions: dict[str, dict[str, str]] = {}
-        self.aliases: dict[str, str] = {}
-        self.artifacts: dict[str, bytes] = {}
-        self.run_status: str | None = None
-        if champion is not None:
-            self.versions[champion] = {
-                "bundle_uri": f"s3://artifacts/models/cxr-classifier/{champion}/"
-            }
-            self.aliases["champion"] = champion
-
-    def get_model_version_by_alias(self, name: str, alias: str) -> Any:
-        if alias not in self.aliases:
-            raise MlflowException("no alias", error_code=RESOURCE_DOES_NOT_EXIST)
-        version = self.aliases[alias]
-        return SimpleNamespace(version=version, tags=self.versions[version], run_id="run-x")
-
-    def get_experiment_by_name(self, name: str) -> None:
-        return None
-
-    def create_experiment(self, name: str) -> str:
-        return "1"
-
-    def create_run(self, experiment_id: str, run_name: str, tags: dict[str, str]) -> Any:
-        info = SimpleNamespace(
-            run_id="seed-run", artifact_uri="mlflow-artifacts:/1/seed-run/artifacts"
-        )
-        return SimpleNamespace(info=info)
-
-    def search_registered_models(self, filter_string: str) -> list[object]:
-        return []
-
-    def create_registered_model(self, name: str) -> None:
-        pass
-
-    def create_model_version(self, name: str, source: str, run_id: str, description: str) -> Any:
-        version = str(len(self.versions) + 1)
-        self.versions[version] = {}
-        return SimpleNamespace(version=version)
-
-    def log_artifacts(self, run_id: str, local_dir: str, artifact_path: str) -> None:
-        for path in Path(local_dir).iterdir():
-            self.artifacts[f"{artifact_path}/{path.name}"] = path.read_bytes()
-
-    def set_model_version_tag(self, name: str, version: str, key: str, value: str) -> None:
-        self.versions[version][key] = value
-
-    def set_registered_model_alias(self, name: str, alias: str, version: str) -> None:
-        self.aliases[alias] = version
-
-    def set_terminated(self, run_id: str, status: str = "FINISHED") -> None:
-        self.run_status = status
 
 
 @pytest.fixture
@@ -239,6 +178,10 @@ def test_extract_rejects_a_bundle_for_other_preprocessing(tmp_path: Path) -> Non
 
 def test_current_champion_is_none_before_seeding() -> None:
     assert current_champion(FakeMlflow()) is None  # type: ignore[arg-type]
+    # The model exists but nothing holds @champion (MLflow: INVALID_PARAMETER_VALUE).
+    no_alias = FakeMlflow()
+    no_alias.versions["1"] = {}
+    assert current_champion(no_alias) is None  # type: ignore[arg-type]
     champion = current_champion(FakeMlflow(champion="3"))  # type: ignore[arg-type]
     assert champion is not None
     assert champion.model_version == "3"

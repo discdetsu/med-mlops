@@ -136,17 +136,19 @@ This is the milestone the showcase needs: fresh clone → `make up` → `make se
 
 `@challenger` replaces `@champion` only when it is not worse on the locked test set in a paired comparison and someone approves it in Django admin. All workers then switch to vN without dropping jobs.
 
-- [ ] Gate task (end of the `train` flow or a separate `promotion` flow): runs champion and challenger on the same locked test set
-- [ ] Paired bootstrap CI of ΔAUROC per class and macro; passes when the lower bound of macro ΔAUROC is not below −margin and no subgroup gets worse by more than the margin
-- [ ] Other gate conditions: parity passed and ECE no worse than a set limit; all values live in `gate.yaml`
-- [ ] Gate report (JSON + HTML) to artifacts, with status in `model_candidates`
-- [ ] Django admin: shows the gate report, approve / reject / rollback actions, and records `model_approvals` (who, when, why)
-- [ ] Approve: Django moves `@champion` to vN in MLflow, the old version gets `@previous`, and Django publishes `model.events` with vN
-- [ ] Rollback: sets `@champion` back to `@previous` and publishes the same event
-- [ ] `auto_promote` config flag (off by default) for the scripted demo
+- [x] Gate task: a separate `gate` flow that the end of the `train` flow calls (`make gate VERSION=N` re-runs it); runs champion and challenger through their ONNX bundles on the same locked test set
+- [x] Paired bootstrap CI of ΔAUROC per class and macro, resampling patients; passes when the lower bound of macro ΔAUROC is not below −margin and no subgroup gets worse by more than the margin (point estimate, n ≥ `min_subgroup_size`)
+- [x] Other gate conditions: parity passed and ECE no worse than a set limit; all values live in `gate.yaml`
+- [x] Gate report (JSON + HTML) to artifacts, with status in `model_candidates` (Django-owned, see ADR 0007)
+- [x] Django admin: shows the gate report, approve / reject / rollback actions, and records `model_approvals` (who, when, why)
+- [x] Approve: Django moves `@champion` to vN in MLflow, the old version gets `@previous`, and Django publishes `model.events` with vN
+- [x] Rollback: sets `@champion` back to `@previous` and publishes the same event (`@previous` is then cleared, so rollback is one step)
+- [x] `auto_promote` config flag (off by default) for the scripted demo
 - [ ] Optional: shadow mode from the v1 plan (on the cut list)
 
 **Done when** a second training run → the gate report appears in admin → approve → the next prediction from every worker has `model_version` = vN, and rollback works.
+
+**Checked** on 2026-10-31 against the core stack with two workers. `make train` registered version 3, gated it against `@champion` version 2 (it passed: same config, seed, and data gave a byte-identical ONNX file, so Δ = 0), and left it pending in admin; `promote --auto` did nothing with `auto_promote` off. Approve in admin → 8 of 8 predictions from both workers had the new version → rollback → 8 of 8 had the previous one. The first real gate (version 1 vs version 2) failed on ECE (0.006 → 0.086) despite a better macro AUROC.
 
 ## Phase 4: Monitoring
 
@@ -214,7 +216,7 @@ Tests arrive with the phase that builds what they test. Unit, schema, parity, an
 | E2E parity | Golden set from raw files → ONNX vs PyTorch (probabilities, features, CAM) | `train` flow + CI with a small model | 1 |
 | API contract | Ninja endpoints, internal API auth | Every push | 2 |
 | Smoke | `core` up → seed model → upload golden image → result with `model_version` | Push to `main` | 2 |
-| Promotion | Approve → event → workers switch to vN, rollback | Manual workflow | 3 |
+| Promotion | Approve → event → workers switch to vN, rollback (manual, see README); the gate's `model_candidates` insert against the real schema (integration) | Manual workflow | 3 |
 | Full loop | `make demo` | Before tagging a release | 5 |
 
 ## Risks and open decisions
@@ -241,7 +243,8 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 
 **Open decisions**
 
-- [ ] N for `should_retrain()` and the gate margin
+- [ ] N for `should_retrain()`
+- [x] The gate margin. Decided: 0.02 for both the macro bound and the subgroup point estimates; reasoning and the measured CI widths are in ADR 0007
 - [x] Which 5 to 6 classes to use. Decided: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax (see the model card)
 - [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
 - [x] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name. Decided: `cxr_core` (diagram updated)

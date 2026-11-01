@@ -4,7 +4,7 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 2, serving core.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+Status: **Phase 3, registry + promotion.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
 
 ## Quickstart: upload → heatmap
 
@@ -29,9 +29,10 @@ Also requires [uv](https://docs.astral.sh/uv/).
 ```sh
 make install          # uv workspace (Python 3.14) + pre-commit hooks
 make test             # unit + API contract tests
-make test-integration # against `make up`: RustFS, MLflow, DVC, RabbitMQ, dataset tables, gateway
+make test-integration # against `make up`: RustFS, MLflow, DVC, RabbitMQ, app tables, gateway
 make seed             # NIH subset from Kaggle → validate → DVC add + push → Postgres
-make train            # train → evaluate → ONNX → E2E parity → reference → register @challenger
+make train            # train → evaluate → ONNX → E2E parity → reference → @challenger → gate
+make gate VERSION=N   # re-run the promotion gate for a version (default: @challenger)
 make bootstrap-champion  # first model → @champion, seed bundle in dist/
 make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana
 make help             # all targets
@@ -40,6 +41,22 @@ make help             # all targets
 `make seed` fetches 4,000 images (≈1.6 GB, about 30 minutes) one file at a time from the public [Kaggle mirror](https://www.kaggle.com/datasets/nih-chest-xrays/data) of NIH ChestX-ray14; no Kaggle token is needed. If you already have the full dataset unpacked, `make seed SEED_ARGS="--from-archive /path/to/dataset"` copies from it instead (seconds for the default subset; about 17 minutes for all 112k images with `--positives-per-class all --negatives all`, most of it `dvc push`); `--from-archive` alone downloads the 45 GB archive once (see [`data/README.md`](data/README.md)). `make train` uses the `demo` profile (ResNet18 at 128 px, trained on a fixed 4,000-image sample of the train split): about 30 minutes on a laptop CPU with the full dataset pinned, most of it scoring the 16k val images every epoch and the 16.6k `test_locked` images at the end. `make train CONFIG=full` uses DenseNet121 at 320 px; its float32 tensor cache needs about 1.2 MB per image, so on the full dataset it doesn't fit on most disks (about 140 GB). Both flows run without a Prefect server under `core`; with `PROFILE=full` they report to the Prefect UI. After a seed, commit the DVC pointers: `git add data/*.dvc && git commit`.
 
 The committed pointers pin the full NIH dataset, and its files live only in the DVC remote they were pushed to: the `datasets` bucket on the RustFS of the machine that seeded them. A fresh clone starts with an empty RustFS, so `make seed` and `make train` stop with `PinnedDataMissingError`, because the frozen `test_locked` can't be regenerated. Either copy that bucket's contents in from the machine that has them, or delete `data/*.dvc` and run `make seed` to start a dataset of your own, with its own locked test set (its models are only comparable with each other).
+
+## Promotion: gate → approve → every worker switches
+
+`make train` ends with the promotion gate: the new `@challenger` and the current `@champion` score the same 16.6k-image locked test set through their ONNX bundles, and a paired bootstrap over patients puts a CI on each AUROC difference. The gate passes when macro AUROC is non-inferior (lower 95% bound of the difference ≥ −0.02), no sex, view, or age subgroup drops by more than 0.02, ECE rises by at most 0.01, and E2E parity passed; the thresholds live in [`gate.yaml`](flows/src/cxr_flows/configs/gate.yaml). It takes about 3 minutes on a laptop CPU. See [ADR 0007](docs/adr/0007-human-promotion-gate.md).
+
+The result waits in Django admin under **Registry → Model candidates**, with the full report. **Approve** (needs a reason) moves `@champion` to the new version and the old one to `@previous`, then tells every worker to load it after its current job. **Reject** closes the candidate. **Roll back** on the list page moves `@champion` back to `@previous`. Each decision is logged in **Model approvals**. A candidate can only be approved while `@champion` is still the version it was compared with; otherwise `make gate VERSION=N` re-runs the comparison. The same actions work without the admin: `make promote VERSION=N REASON="..."` and `make rollback REASON="..."`. With `auto_promote: true` in `gate.yaml`, `make train` approves a passing version by itself (for the scripted demo).
+
+Checking that a promotion reaches every worker:
+
+```sh
+docker compose --profile core up -d --scale worker=2
+make gate VERSION=N   # or make train; then approve version N in the admin
+make smoke            # repeat a few times: each prediction must come from version N
+                      # then roll back in the admin
+make smoke            # predictions come from the previous champion again
+```
 
 `make up` copies `.env.example` to `.env` on first run. Change the passwords there for anything other than a local demo.
 
@@ -70,10 +87,11 @@ compose/               config mounted into compose services (one folder per serv
   prometheus/ alertmanager/ grafana/
 packages/cxr_core/     shared preprocess / ONNX inference / CAM / metrics / bundle / registry names
                        (numpy only); model factory behind [train]
-backend/               Django + Ninja: jobs, feedback, registry (champion, seed_model), monitoring
+backend/               Django + Ninja: jobs, feedback, registry (champion, seed_model, promotion
+                       admin), monitoring
 worker/                Celery ONNX inference worker, no Django, no torch
-flows/                 Prefect flows: ingest, train; promotion, monitor later
-  src/cxr_flows/configs/ training profiles: demo, full
+flows/                 Prefect flows: ingest, train, promotion (gate); monitor later
+  src/cxr_flows/configs/ training profiles (demo, full) and gate.yaml
 frontend/              Svelte + Vite UI, built into the nginx image
 data/                  DVC-tracked datasets; only .dvc pointers are committed
 scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wait_healthy.sh

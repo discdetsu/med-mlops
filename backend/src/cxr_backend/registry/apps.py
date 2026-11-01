@@ -2,8 +2,8 @@ from django.apps import AppConfig
 
 
 class RegistryConfig(AppConfig):
-    """Phase 2: the champion lookup and `seed_model`. Phase 3 adds model_candidates,
-    model_approvals, and the approve / reject / rollback admin actions."""
+    """The champion lookup, `seed_model`, and promotion: model candidates from the gate,
+    approve / reject / rollback in admin, and the model_approvals log (ADR 0007)."""
 
     name = "cxr_backend.registry"
     label = "registry"
