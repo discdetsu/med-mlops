@@ -15,10 +15,13 @@ requeueing, so RabbitMQ dead-letters it to `dlq` (policy `inference-dead-letter`
 
 import logging
 import os
+from typing import Any
 
 from celery import Celery
+from celery.signals import worker_init
 
 from cxr_core.messaging import INFERENCE_QUEUE
+from cxr_worker import metrics
 from cxr_worker.events import ModelEvents
 
 app = Celery("cxr_worker", include=["cxr_worker.tasks"])
@@ -45,6 +48,12 @@ app.conf.update(
     control_queue_exclusive=True,
 )
 app.steps["consumer"].add(ModelEvents)
+
+
+@worker_init.connect  # type: ignore[untyped-decorator]
+def _start_metrics(**kwargs: Any) -> None:
+    metrics.start_server()
+
 
 # httpx logs every request at INFO; the worker's own log lines say what happened.
 logging.getLogger("httpx").setLevel(logging.WARNING)

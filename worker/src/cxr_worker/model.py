@@ -19,6 +19,7 @@ from cxr_core.bundle import HEAD_FILE, MANIFEST_FILE, ONNX_FILE, Manifest, load_
 from cxr_core.inference import OnnxSession
 from cxr_core.preprocess import PREPROCESS_VERSION
 from cxr_core.registry import split_s3_uri
+from cxr_worker import metrics
 from cxr_worker.backend import BackendClient, ChampionInfo, NoChampion
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,9 @@ class ModelHolder:
                 f"{info.bundle_uri} holds version {model.version}, expected {info.model_version}"
             )
         previous, self.current = self.current, model
+        metrics.serving(info.model_name, model.version)
+        if previous is not None:
+            metrics.MODEL_SWAPS.labels("ok").inc()
         logger.info(
             "serving %s version %s (was %s)",
             info.model_name,
@@ -128,6 +132,7 @@ class ModelHolder:
             self.load(info)
         except Exception:
             self.stale = True
+            metrics.MODEL_SWAPS.labels("failed").inc()
             logger.exception(
                 "swapping to version %s failed; still serving %s",
                 info.model_version,

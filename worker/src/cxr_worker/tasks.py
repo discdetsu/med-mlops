@@ -10,6 +10,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from celery import Task
 
 from cxr_core.messaging import INFER_TASK
+from cxr_worker import metrics
 from cxr_worker.app import app
 from cxr_worker.context import Context, context
 from cxr_worker.deadline import JobTimeout, deadline
@@ -52,13 +53,16 @@ def infer(self: Task, job_id: str, raw_key: str) -> None:
     except TRANSIENT as exc:
         _retry_or_fail(self, ctx, job_id, exc)
 
-    payload["latency_ms"] = (time.perf_counter() - started) * 1000
+    elapsed = time.perf_counter() - started
+    payload["latency_ms"] = elapsed * 1000
     try:
         ctx.backend.post_result({"job_id": job_id, "status": "succeeded", "prediction": payload})
     except httpx.HTTPError as exc:
         # Re-running the job is safe: object keys are per job and the backend records the
         # first result only.
         _retry_or_fail(self, ctx, job_id, exc)
+    metrics.JOBS.labels("succeeded").inc()
+    metrics.JOB_DURATION.labels(payload["model_version"]).observe(elapsed)
 
 
 def _process(ctx: Context, model: LoadedModel, job_id: str, raw_key: str) -> dict[str, Any]:
@@ -92,6 +96,7 @@ def _process(ctx: Context, model: LoadedModel, job_id: str, raw_key: str) -> dic
         "thresholds": dict(manifest.thresholds),
         "image_key": image_key,
         "heatmap_keys": heatmap_keys,
+        "embedding": result.embedding,
         "worker": socket.gethostname(),
     }
 
@@ -101,6 +106,7 @@ def _retry_or_fail(task: Task, ctx: Context, job_id: str, exc: Exception) -> NoR
     if retries >= MAX_RETRIES:
         _fail(ctx, job_id, f"gave up after {retries} retries: {type(exc).__name__}: {exc}")
         raise exc
+    metrics.JOBS.labels("retried").inc()
     logger.warning("job %s: %s; retry %d of %d", job_id, exc, retries + 1, MAX_RETRIES)
     raise task.retry(exc=exc, countdown=min(2 ** (retries + 1), 60))
 
@@ -108,6 +114,7 @@ def _retry_or_fail(task: Task, ctx: Context, job_id: str, exc: Exception) -> NoR
 def _fail(ctx: Context, job_id: str, error: str) -> None:
     """Best effort: if the backend is down too, the job stays queued and the message is in
     the DLQ for inspection."""
+    metrics.JOBS.labels("failed").inc()
     try:
         ctx.backend.post_result({"job_id": job_id, "status": "failed", "error": error})
     except httpx.HTTPError:
