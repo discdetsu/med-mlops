@@ -11,5 +11,6 @@ One file per decision, written when the decision is made. Copy `template.md`, ta
 | [0005](0005-async-inference-queue.md) | Async inference via RabbitMQ; solo-pool workers swap models between jobs; poison jobs go to the DLQ | Accepted |
 | [0006](0006-flow-tables-in-django-on-demand.md) | Django reads the flows' tables only once a feature needs them; flows and backend share one table namespace | Accepted; Django owns `model_candidates` per 0007 |
 | [0007](0007-human-promotion-gate.md) | Paired patient-level bootstrap gate on the locked test set, then approval in Django admin; rollback to `@previous` | Accepted |
+| [0008](0008-monitoring-drift-and-alerts.md) | Each version's recent predictions vs its own drift reference with Evidently, delayed AUROC from feedback, alerts through Prometheus and Alertmanager; never retrains | Accepted |
 
 Still to write (see the implementation plan, Phase 6): label-driven retraining.

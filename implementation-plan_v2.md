@@ -1,6 +1,6 @@
 # CXR MLOps Implementation Plan v2
 
-Last updated: 2026-10-29 · No deadlines: phases are ordered by dependency.
+Last updated: 2026-11-01 · No deadlines: phases are ordered by dependency.
 
 ## Goal and definition of done
 
@@ -156,25 +156,27 @@ The system sees infra health, drift, and real performance from feedback per `mod
 
 **System monitoring**
 
-- [ ] Prometheus scrapes Django and the worker (`/metrics`: request latency, job failures, inference latency) and RabbitMQ through its Prometheus plugin
-- [ ] Grafana dashboards as code (provisioning): serving, queue, and model per version
-- [ ] Alert rules: API error rate, non-empty DLQ, missing worker, stale `monitor_last_success`, drift score above threshold
-- [ ] Alertmanager sends to Discord or Slack through a webhook in `.env`
+- [x] Prometheus scrapes Django and the worker (`/metrics`: request latency, job failures, inference latency) and RabbitMQ through its Prometheus plugin (workers found through Docker DNS; per-queue metrics from `/metrics/detailed`)
+- [x] Grafana dashboards as code (provisioning): serving, queue, and model per version
+- [x] Alert rules: API error rate, non-empty DLQ, missing worker, stale `monitor_last_success`, drift score above threshold; unit-tested with promtool (`make test-rules`)
+- [x] Alertmanager sends to Discord or Slack through a webhook in `.env`
 
 **Monitor flow (Prefect + Evidently)**
 
-- [ ] Scheduled flow reads prediction windows per `model_version` from Postgres
-- [ ] Evidently: embedding drift, prediction drift, and metadata drift against the current `@champion` reference
-- [ ] Delayed AUROC from feedback that carries labels, reported with n and a CI, and not reported when n is below the configured minimum
-- [ ] Push scores and `last_success_timestamp` to Pushgateway, store the HTML report in artifacts and a row in `drift_reports`
-- [ ] Optional: per-image OOD flag in the worker from embedding distance to the reference, shown in the UI without triggering anything
+- [x] Scheduled flow reads prediction windows per `model_version` from Postgres (the `monitor` service under `full`; `make monitor` for one pass)
+- [x] Evidently: embedding drift, prediction drift, and metadata drift against the current `@champion` reference (each version against its own reference, since embeddings of different versions aren't comparable; ADR 0008). The worker now reports the pooled embedding, and uploads carry sex, age, and view from form fields or the DICOM header
+- [x] Delayed AUROC from feedback that carries labels, reported with n and a CI, and not reported when n is below the configured minimum
+- [x] Push scores and `last_success_timestamp` to Pushgateway, store the HTML report in artifacts and a row in `drift_reports` (Django-owned like `model_candidates`, listed in admin)
+- [ ] Optional: per-image OOD flag in the worker from embedding distance to the reference, shown in the UI without triggering anything (cut list item 2; not built)
 
 **Demo tooling**
 
-- [ ] `scripts/replay_traffic.py` sends validation images to the API
-- [ ] `scripts/inject_drift.py` sends only a slice that differs from the reference, such as AP views only
+- [x] `scripts/replay_traffic.py` sends validation images to the API (`make replay`; with NIH metadata, and NIH labels as feedback with `--feedback`)
+- [x] `scripts/inject_drift.py` sends only a slice that differs from the reference, such as AP views only (`make inject-drift`)
 
 **Done when** running `inject_drift.py` raises the drift score in Grafana and sends an alert to Discord, and stopping the monitor flow fires the stale alert.
+
+**Checked** on 2026-11-01 against the `full` stack with `@champion` version 2, with Alertmanager's Discord receiver pointed at a local webhook sink. 150 validation images with metadata (45 with NIH-label feedback) gave no drift: embedding 0.48 against a threshold of 0.6, and a delayed macro AUROC of 0.64 (95% CI 0.51 to 0.82). `inject_drift.py --n 200` (AP views) gave embedding 0.76 and view 0.54 in the next pass, and both `CxrDriftDetected` alerts reached the webhook as one Discord message. `docker compose stop monitor` fired `CxrMonitorStale` after 16 minutes. The first live window held 50 duplicate uploads and scored 0.635 without any shift, so windows now count each file once (ADR 0008).
 
 ## Phase 5: Labeling loop
 
@@ -217,6 +219,7 @@ Tests arrive with the phase that builds what they test. Unit, schema, parity, an
 | API contract | Ninja endpoints, internal API auth | Every push | 2 |
 | Smoke | `core` up → seed model → upload golden image → result with `model_version` | Push to `main` | 2 |
 | Promotion | Approve → event → workers switch to vN, rollback (manual, see README); the gate's `model_candidates` insert against the real schema (integration) | Manual workflow | 3 |
+| Monitoring | Drift scores and delayed AUROC on synthetic windows (unit); the monitor's SQL against the real schema (integration); alert rules (promtool); replay → drift → alert, stop → stale (manual, see README) | Every push; manual | 4 |
 | Full loop | `make demo` | Before tagging a release | 5 |
 
 ## Risks and open decisions
