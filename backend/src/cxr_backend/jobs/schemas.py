@@ -21,6 +21,12 @@ class PredictionOut(Schema):
     heatmap_urls: dict[str, str]
 
 
+class JobMetadata(Schema):
+    patient_sex: str
+    patient_age: int | None
+    view_position: str
+
+
 class JobOut(Schema):
     id: UUID
     status: str
@@ -29,6 +35,7 @@ class JobOut(Schema):
     created_at: datetime
     finished_at: datetime | None
     error: str
+    metadata: JobMetadata
     prediction: PredictionOut | None
 
 
@@ -49,6 +56,7 @@ class PredictionIn(Schema):
     heatmap_keys: dict[str, str]
     latency_ms: float
     worker: str = ""
+    embedding: list[float] | None = None
 
     @model_validator(mode="after")
     def _keys_match_classes(self) -> PredictionIn:

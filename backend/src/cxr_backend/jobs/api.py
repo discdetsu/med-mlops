@@ -13,13 +13,21 @@ from django.http import HttpRequest, HttpResponse
 from django.urls import reverse
 from django.utils import timezone
 from kombu.exceptions import OperationalError
-from ninja import File, Router, Status
+from ninja import File, Form, Router, Status
 from ninja.files import UploadedFile
 
 from cxr_backend import storage
+from cxr_backend.jobs import metadata
 from cxr_backend.jobs.models import InferenceJob, Prediction
 from cxr_backend.jobs.queue import enqueue
-from cxr_backend.jobs.schemas import Error, JobOut, PredictionOut, ResultAck, ResultIn
+from cxr_backend.jobs.schemas import (
+    Error,
+    JobMetadata,
+    JobOut,
+    PredictionOut,
+    ResultAck,
+    ResultIn,
+)
 from cxr_backend.jobs.upload import CONTENT_TYPES, EXTENSIONS, sniff_format
 from cxr_backend.monitoring.metrics import INFERENCE_LATENCY, JOB_RESULTS, JOBS_CREATED
 
@@ -30,8 +38,18 @@ internal_router = Router(tags=["internal"])
 
 
 @router.post("", response={202: JobOut, 400: Error, 413: Error, 415: Error, 503: Error})
-def create_job(request: HttpRequest, file: File[UploadedFile]) -> Status[JobOut | Error]:
-    """Store the upload in `inference/raw/`, record a job, and queue it for a worker."""
+def create_job(
+    request: HttpRequest,
+    file: File[UploadedFile],
+    patient_sex: Form[str | None] = None,
+    patient_age: Form[str | None] = None,
+    view_position: Form[str | None] = None,
+) -> Status[JobOut | Error]:
+    """Store the upload in `inference/raw/`, record a job, and queue it for a worker.
+
+    The optional form fields are the image's metadata, for metadata drift; for DICOM the
+    header fills in whatever they leave out.
+    """
     size = file.size or 0
     if size == 0:
         return Status(400, Error(detail="empty file"))
@@ -42,6 +60,9 @@ def create_job(request: HttpRequest, file: File[UploadedFile]) -> Status[JobOut 
         return Status(415, Error(detail="expected a PNG, JPEG, or DICOM (Part 10) file"))
 
     file.seek(0)
+    meta = metadata.normalize(patient_sex, patient_age, view_position)
+    if fmt == InferenceJob.Format.DICOM:
+        meta = meta.fill_from(metadata.from_dicom(file))
     digest = hashlib.sha256()
     for chunk in file.chunks():
         digest.update(chunk)
@@ -62,6 +83,9 @@ def create_job(request: HttpRequest, file: File[UploadedFile]) -> Status[JobOut 
         size_bytes=size,
         sha256=digest.hexdigest(),
         raw_key=raw_key,
+        patient_sex=meta.patient_sex,
+        patient_age=meta.patient_age,
+        view_position=meta.view_position,
     )
     try:
         enqueue(str(job.id), raw_key)
@@ -145,6 +169,11 @@ def job_out(job: InferenceJob) -> JobOut:
         created_at=job.created_at,
         finished_at=job.finished_at,
         error=job.error,
+        metadata=JobMetadata(
+            patient_sex=job.patient_sex,
+            patient_age=job.patient_age,
+            view_position=job.view_position,
+        ),
         prediction=None if prediction is None else _prediction_out(prediction),
     )
 

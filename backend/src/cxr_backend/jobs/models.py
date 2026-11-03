@@ -30,6 +30,11 @@ class InferenceJob(models.Model):
     size_bytes = models.PositiveIntegerField()
     sha256 = models.CharField(max_length=64)
     raw_key = models.CharField(max_length=512, help_text="Key in the inference bucket")
+    # For metadata drift (jobs/metadata.py): from the upload's form fields, else the DICOM
+    # header; blank / null when neither has them.
+    patient_sex = models.CharField(max_length=1, blank=True, help_text="M, F, or blank")
+    patient_age = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Years")
+    view_position = models.CharField(max_length=16, blank=True, help_text="PA, AP, ...")
     error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     finished_at = models.DateTimeField(null=True, blank=True)
@@ -58,6 +63,10 @@ class Prediction(models.Model):
     thresholds = models.JSONField(help_text="{class: threshold}")
     image_key = models.CharField(max_length=512, help_text="Display image in the inference bucket")
     heatmap_keys = models.JSONField(help_text="{class: CAM PNG key in the inference bucket}")
+    # Null for results from workers older than Phase 4.
+    embedding = models.JSONField(
+        null=True, blank=True, help_text="Pooled features (GAP), for embedding drift"
+    )
     latency_ms = models.FloatField(help_text="Worker time: download → preprocess → ONNX → CAM")
     worker = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
