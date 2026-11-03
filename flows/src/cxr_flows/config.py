@@ -1,5 +1,5 @@
 """Config files in `configs/`, validated with pydantic: training profiles
-(`<profile>.yaml`) and the promotion gate (`gate.yaml`).
+(`<profile>.yaml`), the promotion gate (`gate.yaml`), and the monitor flow (`monitor.yaml`).
 
 A training config is frozen once loaded; its hash goes on the MLflow run so two runs with the
 same dataset_rev and config_hash are directly comparable.
@@ -10,7 +10,7 @@ from importlib import resources
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ParityTolerance(BaseModel):
@@ -71,6 +71,40 @@ class GateConfig(BaseModel):
     seed: int = 0
 
 
+class MetadataThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    view_position: float = Field(gt=0)
+    patient_sex: float = Field(gt=0)
+    patient_age: float = Field(gt=0)
+
+
+class MonitorConfig(BaseModel):
+    """Drift windows, thresholds, and delayed AUROC (see configs/monitor.yaml and ADR 0008)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    interval_seconds: int = Field(ge=10)
+    window_size: int = Field(ge=1)
+    max_window_age_minutes: int = Field(ge=1)
+    min_window_size: int = Field(ge=2)
+    reference_sample: int = Field(ge=10)
+    seed: int = 0
+    embedding_threshold: float = Field(gt=0, le=1)
+    prediction_threshold: float = Field(gt=0)
+    metadata_thresholds: MetadataThresholds
+    feedback_window_days: int = Field(ge=1)
+    min_feedback: int = Field(ge=2)
+    bootstrap_samples: int = Field(ge=0)
+    confidence: float = Field(default=0.95, gt=0, lt=1)
+
+    @model_validator(mode="after")
+    def _window_holds_the_minimum(self) -> MonitorConfig:
+        if self.min_window_size > self.window_size:
+            raise ValueError("min_window_size can't exceed window_size")
+        return self
+
+
 def load_config(profile_or_path: str) -> TrainConfig:
     """Load a bundled profile by name (`demo`, `full`) or any YAML file by path."""
     return TrainConfig.model_validate(_load_yaml(profile_or_path))
@@ -78,6 +112,10 @@ def load_config(profile_or_path: str) -> TrainConfig:
 
 def load_gate_config(name_or_path: str = "gate") -> GateConfig:
     return GateConfig.model_validate(_load_yaml(name_or_path))
+
+
+def load_monitor_config(name_or_path: str = "monitor") -> MonitorConfig:
+    return MonitorConfig.model_validate(_load_yaml(name_or_path))
 
 
 def _load_yaml(name_or_path: str) -> object:

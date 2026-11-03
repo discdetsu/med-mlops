@@ -1,3 +1,9 @@
+import os
+
+# cxr_flows loggers forward to Prefect's API (cxr_flows/__init__.py); unit tests call flow code
+# outside a flow run, where there is no run to attach the lines to.
+os.environ.setdefault("PREFECT_LOGGING_TO_API_WHEN_MISSING_FLOW", "ignore")
+
 from collections.abc import Callable
 from pathlib import Path
 
