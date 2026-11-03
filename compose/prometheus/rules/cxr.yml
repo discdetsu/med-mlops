@@ -1,0 +1,78 @@
+# Alert rules (ADR 0008). Unit tests: compose/prometheus/tests/rules_test.yml (`make test-rules`).
+# Alertmanager groups by alertname and model_version and sends to Discord or Slack (.env).
+groups:
+  - name: cxr-serving
+    rules:
+      - alert: CxrApiErrorRate
+        # At least a request every 10 s, so a single error on an idle stack doesn't page.
+        expr: |
+          (
+            sum(rate(cxr_http_request_duration_seconds_count{status=~"5.."}[5m]))
+              / sum(rate(cxr_http_request_duration_seconds_count[5m]))
+          ) > 0.05
+          and sum(rate(cxr_http_request_duration_seconds_count[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API error rate is {{ $value | humanizePercentage }} (5xx, last 5 minutes)"
+
+      - alert: CxrBackendDown
+        expr: up{job="backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus can't scrape the backend's /metrics"
+
+      - alert: CxrWorkerMissing
+        # Replicas leave Docker's DNS when they stop, so there is no up == 0 to catch.
+        expr: absent(up{job="worker"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No inference worker is up; uploads queue but never finish"
+
+      - alert: CxrDeadLetterQueueNotEmpty
+        expr: sum(rabbitmq_detailed_queue_messages{queue="dlq"}) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} job(s) in the DLQ: poison uploads or exhausted retries (ADR 0005)"
+
+  - name: cxr-model
+    rules:
+      - alert: CxrDriftDetected
+        # Both series come from the same push with the same labels; thresholds are in
+        # flows/src/cxr_flows/configs/monitor.yaml.
+        expr: cxr_drift_score > cxr_drift_threshold
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            {{ $labels.kind }} drift ({{ $labels.feature }}) for model version
+            {{ $labels.model_version }}: score {{ $value | printf "%.3f" }}
+          description: "The report is in Django admin under Monitoring → Drift reports."
+
+      - alert: CxrMonitorStale
+        # Three missed passes of the monitor flow.
+        expr: >-
+          time() - cxr_monitor_last_success_timestamp_seconds
+            > 3 * cxr_monitor_interval_seconds
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            The monitor flow last succeeded {{ $value | humanizeDuration }} ago; drift and
+            delayed AUROC are not being checked
+
+      - alert: CxrMonitorNeverRan
+        expr: absent(cxr_monitor_last_success_timestamp_seconds)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The monitor flow has not pushed a result since the Pushgateway started"

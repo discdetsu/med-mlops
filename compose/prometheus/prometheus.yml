@@ -15,13 +15,38 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
+  # The monitor flow's drift scores, delayed AUROC, and heartbeat (ADR 0008). honor_labels
+  # keeps the pushed job="cxr_monitor" instead of "pushgateway".
   - job_name: pushgateway
     honor_labels: true
     static_configs:
       - targets: ["pushgateway:9091"]
 
+  # Django: request latency by route, jobs, results and inference latency per model_version,
+  # feedback (cxr_backend.monitoring.metrics).
+  - job_name: backend
+    static_configs:
+      - targets: ["backend:8000"]
+
+  # Every worker container: Docker's DNS returns one A record per replica of the service, so
+  # `--scale worker=N` is picked up without a config change.
+  - job_name: worker
+    dns_sd_configs:
+      - names: ["worker"]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+
+  # Node-wide totals (connections, channels, messages).
   - job_name: rabbitmq
     static_configs:
       - targets: ["rabbitmq:15692"]
 
-  # Phase 4: backend (/metrics) and worker targets.
+  # Per-queue depth and consumers, for the DLQ and the inference queue.
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      vhost: ["/"]
+      family: ["queue_coarse_metrics", "queue_consumer_count"]
+    static_configs:
+      - targets: ["rabbitmq:15692"]

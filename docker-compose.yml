@@ -2,8 +2,9 @@
 #   core: upload → heatmap demo and promotion through Django admin
 #   full: core + training, monitoring, and labeling loop
 # Flows run on the host (`make seed`, `make train`): in-process under `core`, reporting to
-# prefect-server under `full`. A Prefect worker joins `full` in Phase 5, when
-# `should_retrain()` triggers the train deployment.
+# prefect-server under `full`. Under `full`, the `monitor` service also runs the monitor flow
+# on a schedule (ADR 0008). A Prefect worker joins `full` in Phase 5, when `should_retrain()`
+# triggers the train deployment.
 name: cxr-mlops
 
 # One set of S3 settings for every client (boto3, MLflow, DVC, aws-cli), so the
@@ -77,6 +78,7 @@ services:
     environment:
       <<: *s3-env
       INFERENCE_RAW_RETENTION_DAYS: ${INFERENCE_RAW_RETENTION_DAYS:-30}
+      MONITORING_REPORT_RETENTION_DAYS: ${MONITORING_REPORT_RETENTION_DAYS:-30}
     entrypoint: ["/bin/sh", "/init/init.sh"]
     volumes:
       - ./compose/rustfs/init.sh:/init/init.sh:ro
@@ -185,6 +187,8 @@ services:
       <<: [*s3-env, *app-env]
       BACKEND_URL: http://backend:8000
       JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-60}
+    # :9100/metrics for Prometheus (full), found through Docker DNS, so `--scale worker=N`
+    # needs no config change. Not published to the host.
     depends_on:
       backend:
         condition: service_healthy
@@ -257,6 +261,40 @@ services:
       start_period: 60s
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
 
+  # The monitor flow on a schedule (`flow.serve`): drift + delayed AUROC → Pushgateway and
+  # drift_reports. `docker compose stop monitor` is how the stale alert is demonstrated.
+  monitor:
+    build:
+      context: .
+      dockerfile: flows/Dockerfile
+    image: cxr-mlops/monitor:dev
+    profiles: [full]
+    environment:
+      <<: *s3-env
+      APP_DATABASE_URL: postgresql://app:${APP_DB_PASSWORD:?set in .env}@postgres:5432/app
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
+      MLFLOW_HTTP_REQUEST_TIMEOUT: "10"
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PUSHGATEWAY_URL: http://pushgateway:9091
+    volumes:
+      - monitor-cache:/home/app/.cache
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      pushgateway:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      # Its migrations create drift_reports.
+      backend:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      start_period: 60s
+      # The Prefect runner's webserver (serve(webserver=True)).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+
   pushgateway:
     image: prom/pushgateway:v1.11.5
     profiles: [full]
@@ -290,8 +328,11 @@ services:
   alertmanager:
     image: prom/alertmanager:v0.34.1
     profiles: [full]
-    command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
+    environment:
+      # Alertmanager can't read env vars in its config; the entrypoint picks the receiver.
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
     volumes:
       - ./compose/alertmanager:/etc/alertmanager:ro
     ports:
@@ -327,3 +368,4 @@ volumes:
   prometheus-data:
   grafana-data:
   labelstudio-data:
+  monitor-cache:

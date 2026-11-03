@@ -14,7 +14,7 @@ env:
 
 jobs:
   checks:
-    name: Lint, type check, unit tests
+    name: Lint, type check, unit tests, alert rules
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -25,6 +25,7 @@ jobs:
       - run: make lint
       - run: make typecheck
       - run: make test
+      - run: make test-rules
 
   integration:
     name: Integration (core stack)

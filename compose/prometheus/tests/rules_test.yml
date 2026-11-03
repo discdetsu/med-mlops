@@ -1,0 +1,139 @@
+# promtool unit tests for rules/cxr.yml: `make test-rules`.
+rule_files:
+  - ../rules/cxr.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: drift above threshold fires, below doesn't
+    interval: 1m
+    input_series:
+      - series: 'cxr_drift_score{job="cxr_monitor",instance="",model_version="2",kind="embedding",feature="embedding"}'
+        values: "0.51 0.71 0.71"
+      - series: 'cxr_drift_threshold{job="cxr_monitor",instance="",model_version="2",kind="embedding",feature="embedding"}'
+        values: "0.6 0.6 0.6"
+      - series: 'cxr_drift_score{job="cxr_monitor",instance="",model_version="2",kind="metadata",feature="patient_sex"}'
+        values: "0.05 0.05 0.05"
+      - series: 'cxr_drift_threshold{job="cxr_monitor",instance="",model_version="2",kind="metadata",feature="patient_sex"}'
+        values: "0.2 0.2 0.2"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: CxrDriftDetected
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: CxrDriftDetected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cxr_monitor
+              model_version: "2"
+              kind: embedding
+              feature: embedding
+            exp_annotations:
+              summary: "embedding drift (embedding) for model version 2: score 0.710"
+              description: "The report is in Django admin under Monitoring → Drift reports."
+
+  - name: monitor goes stale after three missed intervals
+    interval: 1m
+    input_series:
+      # Last success at t=0 (pushed once; the Pushgateway keeps serving the same value).
+      - series: 'cxr_monitor_last_success_timestamp_seconds{job="cxr_monitor",instance=""}'
+        values: "0x30"
+      - series: 'cxr_monitor_interval_seconds{job="cxr_monitor",instance=""}'
+        values: "300x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CxrMonitorStale
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: CxrMonitorStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cxr_monitor
+            exp_annotations:
+              summary: >-
+                The monitor flow last succeeded 17m 0s ago; drift and delayed AUROC are not
+                being checked
+
+  - name: a monitor that keeps succeeding is not stale
+    interval: 5m
+    input_series:
+      - series: 'cxr_monitor_last_success_timestamp_seconds{job="cxr_monitor",instance=""}'
+        values: "0+300x12"
+      - series: 'cxr_monitor_interval_seconds{job="cxr_monitor",instance=""}'
+        values: "300x12"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: CxrMonitorStale
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CxrMonitorNeverRan
+        exp_alerts: []
+
+  - name: never ran
+    interval: 1m
+    input_series:
+      - series: 'up{job="backend",instance="backend:8000"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: CxrMonitorNeverRan
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The monitor flow has not pushed a result since the Pushgateway started"
+
+  - name: dead-lettered jobs
+    interval: 1m
+    input_series:
+      - series: 'rabbitmq_detailed_queue_messages{job="rabbitmq-queues",instance="rabbitmq:15692",vhost="/",queue="dlq"}'
+        values: "0 0 2 2 2"
+      - series: 'rabbitmq_detailed_queue_messages{job="rabbitmq-queues",instance="rabbitmq:15692",vhost="/",queue="inference"}'
+        values: "5 5 5 5 5"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CxrDeadLetterQueueNotEmpty
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: CxrDeadLetterQueueNotEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "2 job(s) in the DLQ: poison uploads or exhausted retries (ADR 0005)"
+
+  - name: workers gone
+    interval: 1m
+    input_series:
+      # A replica that stops leaves Docker's DNS; Prometheus then marks its series stale.
+      - series: 'up{job="worker",instance="172.18.0.9:9100"}'
+        values: "1 1 stale stale stale stale"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CxrWorkerMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: CxrWorkerMissing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No inference worker is up; uploads queue but never finish"
+
+  - name: error rate needs traffic and 5xx share
+    interval: 1m
+    input_series:
+      - series: 'cxr_http_request_duration_seconds_count{job="backend",instance="backend:8000",method="POST",route="api/jobs",status="202"}'
+        values: "0+60x15"
+      - series: 'cxr_http_request_duration_seconds_count{job="backend",instance="backend:8000",method="POST",route="api/jobs",status="500"}'
+        values: "0+12x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CxrApiErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "API error rate is 16.67% (5xx, last 5 minutes)"

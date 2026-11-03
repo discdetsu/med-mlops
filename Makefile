@@ -18,12 +18,17 @@ export APP_DATABASE_URL := postgresql://app:$(APP_DB_PASSWORD)@localhost:5432/ap
 # report to the Prefect server so runs show up in its UI.
 ifeq ($(PROFILE),full)
 export PREFECT_API_URL := http://localhost:4200/api
+# `make monitor` pushes its scores like the scheduled `monitor` service does.
+export PUSHGATEWAY_URL := http://localhost:9091
 endif
 
 CONFIG ?= demo
 SEED_ARGS ?=
 TRAIN_ARGS ?=
 GATE_ARGS ?=
+MONITOR_ARGS ?=
+ARGS ?=
+PROMETHEUS_IMAGE := prom/prometheus:v3.15.1
 
 # What `make seed-model` registers: a release URL (default) or a local path such as
 # dist/cxr-seed-bundle-v2.tar.gz from `make bootstrap-champion`. Its .sha256 must sit next to it.
@@ -37,7 +42,7 @@ seed_source := /seed/$(notdir $(SEED_BUNDLE))
 seed_mount := -v "$(abspath $(dir $(SEED_BUNDLE))):/seed:ro"
 endif
 
-.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration seed train gate promote rollback bootstrap-champion seed-model smoke demo
+.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration test-rules seed train gate promote rollback bootstrap-champion seed-model smoke monitor replay inject-drift demo
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -82,6 +87,11 @@ test:  ## Unit tests
 test-integration:  ## Integration tests against the running core stack
 	uv run pytest -m integration
 
+test-rules:  ## Check the Prometheus config and unit-test the alert rules with promtool
+	docker run --rm -u 0 -v "$(CURDIR)/compose/prometheus:/etc/prometheus:ro" -w /etc/prometheus/tests \
+		--entrypoint sh $(PROMETHEUS_IMAGE) -c \
+		'promtool check config /etc/prometheus/prometheus.yml && promtool test rules rules_test.yml'
+
 seed:  ## Download the NIH subset → validate → DVC add + push → Postgres (SEED_ARGS=...)
 	uv run python -m cxr_flows.ingest $(SEED_ARGS)
 
@@ -114,6 +124,15 @@ seed-model:  ## Register the seed bundle as @champion; workers load it (SEED_BUN
 
 smoke:  ## Upload an image through nginx and check the prediction (stack up and seeded)
 	scripts/smoke_core.sh
+
+monitor:  ## One monitor pass: drift + delayed AUROC per version (PROFILE=full pushes to Prometheus)
+	uv run python -m cxr_flows.monitor run $(MONITOR_ARGS)
+
+replay:  ## Send validation images through the API (ARGS="--n 300 --feedback 0.5")
+	uv run python scripts/replay_traffic.py $(ARGS)
+
+inject-drift:  ## Send AP views only, a slice that differs from the reference (ARGS="--n 200")
+	uv run python scripts/inject_drift.py $(ARGS)
 
 demo:  ## Phase 5: scripted label → retrain → promote loop
 	@echo "not implemented yet (Phase 5)"; exit 1
