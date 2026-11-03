@@ -15,6 +15,7 @@ dependencies = [
     "gunicorn>=26",
     "whitenoise>=6.12",
     "prometheus-client>=0.26",
+    "pydicom>=3.0",
 ]
 
 [build-system]
