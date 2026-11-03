@@ -21,6 +21,11 @@ STATUS_APPROVED = "approved"
 STATUS_REJECTED = "rejected"
 STATUS_ROLLED_BACK = "rolled_back"
 
+# Monitoring (ADR 0008): Django owns the table, the monitor flow inserts one row per drift
+# report, and the HTML reports live under this prefix in the artifacts bucket.
+DRIFT_REPORTS_TABLE = "drift_reports"
+MONITORING_PREFIX = "monitoring/"
+
 
 def bundle_prefix(model_name: str, version: str) -> str:
     """Key prefix of a version's serving bundle in the artifacts bucket."""
@@ -34,6 +39,11 @@ def bundle_uri(model_name: str, version: str) -> str:
 def gate_report_prefix(model_name: str, version: str) -> str:
     """Key prefix of a version's gate reports, next to its bundle (workers never read it)."""
     return f"{bundle_prefix(model_name, version)}gate/"
+
+
+def drift_report_prefix(model_name: str, version: str) -> str:
+    """Key prefix of a version's drift reports in the artifacts bucket."""
+    return f"{MONITORING_PREFIX}{model_name}/{version}/"
 
 
 def split_s3_uri(uri: str) -> tuple[str, str]:

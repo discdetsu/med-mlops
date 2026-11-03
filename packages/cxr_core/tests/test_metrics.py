@@ -5,9 +5,11 @@ import pytest
 
 from cxr_core.metrics import (
     binary_auroc,
+    bootstrap_auroc,
     expected_calibration_error,
     paired_bootstrap_auroc,
     per_class_auroc,
+    percentile_ci,
     sensitivity_at_specificity,
 )
 
@@ -192,3 +194,30 @@ class TestPairedBootstrap:
             paired_bootstrap_auroc(
                 np.zeros((3, 1)), np.zeros((3, 1)), np.zeros((3, 1)), n_boot=1, groups={"g": [1]}
             )
+
+
+def test_bootstrap_auroc_matches_point_estimate_and_brackets_it() -> None:
+    rng = np.random.default_rng(3)
+    y = rng.integers(0, 2, (300, 2))
+    s = y * 0.6 + rng.random((300, 2))
+    result = bootstrap_auroc(y, s, n_boot=200, seed=1)
+
+    assert result.n == 300
+    np.testing.assert_allclose(result.auroc, per_class_auroc(y, s))
+    assert result.boot.shape == (200, 2)
+    lo, hi = percentile_ci(result.boot_macro)
+    assert lo < result.macro < hi
+
+
+def test_bootstrap_auroc_class_without_positives_is_nan() -> None:
+    y = np.array([[0, 1], [0, 0], [0, 1], [0, 0]])
+    s = np.array([[0.1, 0.9], [0.2, 0.1], [0.3, 0.8], [0.4, 0.3]])
+    result = bootstrap_auroc(y, s, n_boot=10)
+    assert math.isnan(result.auroc[0])
+    assert result.macro == pytest.approx(1.0)
+
+
+def test_percentile_ci_ignores_nan_and_handles_empty() -> None:
+    assert percentile_ci([math.nan, math.nan]) is None
+    lo, hi = percentile_ci([*range(101), math.nan], confidence=0.9)
+    assert (lo, hi) == pytest.approx((5.0, 95.0))
