@@ -7,8 +7,13 @@ set -eu
 profile=${1:?usage: wait_healthy.sh <profile> [timeout_seconds]}
 deadline=$(( $(date +%s) + ${2:-300} ))
 
+# `ps -a` lists every container in the project, whatever the profile, so name the services:
+# stopped containers left by a `full` stack must not fail a `core` start.
+services=$(docker compose --profile "$profile" config --services)
+
 while :; do
-    status=$(docker compose --profile "$profile" ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}')
+    # shellcheck disable=SC2086  # the service names are separate arguments
+    status=$(docker compose --profile "$profile" ps -a --format '{{.Service}}|{{.State}}|{{.Health}}|{{.ExitCode}}' $services)
     if [ -z "$status" ]; then
         echo "no containers for profile '$profile'" >&2; exit 1
     fi
