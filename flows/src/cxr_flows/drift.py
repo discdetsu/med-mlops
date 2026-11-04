@@ -52,6 +52,8 @@ CATEGORICAL_METADATA = ("view_position", "patient_sex")
 NUMERICAL_METADATA = ("patient_age",)
 METADATA = (*CATEGORICAL_METADATA, *NUMERICAL_METADATA)
 _EMBEDDINGS = "embedding"
+# The backend stores an "agree" as the model's own thresholded predictions (feedback/api.py).
+VERDICT_AGREE = "agree"
 
 
 class DriftError(ValueError):
@@ -218,10 +220,16 @@ class DelayedAuroc:
     macro: float | None = None
     macro_ci: tuple[float, float] | None = None
     per_class: Mapping[str, Mapping[str, Any]] | None = None
+    n_agree: int = 0
 
     @property
     def reported(self) -> bool:
         return self.macro is not None
+
+    @property
+    def agree_share(self) -> float | None:
+        """How much of the AUROC scores the model against itself; None without feedback."""
+        return self.n_agree / self.n if self.n else None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +239,7 @@ class DelayedAuroc:
             "macro": self.macro,
             "macro_ci": list(self.macro_ci) if self.macro_ci else None,
             "per_class": dict(self.per_class or {}),
+            "n_agree": self.n_agree,
         }
 
 
@@ -239,18 +248,24 @@ def delayed_auroc(
 ) -> DelayedAuroc:
     """AUROC of the version's probabilities against reviewer labels, with a bootstrap CI.
 
-    `feedback` has one row per job: `labels` ({class: 0/1}) and `probabilities` ({class: p}).
-    Below `min_feedback` rows nothing is reported; a class without both a positive and a
-    negative label has no AUROC and is left out of the macro.
+    `feedback` has one row per job: `verdict`, `labels` ({class: 0/1}) and `probabilities`
+    ({class: p}). Below `min_feedback` rows nothing is reported; a class without both a positive
+    and a negative label has no AUROC and is left out of the macro.
+
+    An "agree" row's labels are the model's own thresholded predictions, so it separates
+    perfectly by construction: all-agree feedback gives exactly 1.0 whatever the model's quality.
+    Those rows still count, since a reviewer did endorse them and the rest lean towards
+    disagreements; read the AUROC with `agree_share` (ADR 0008).
     """
     n = len(feedback)
+    n_agree = int((feedback["verdict"] == VERDICT_AGREE).sum())
     if n < cfg.min_feedback:
-        return DelayedAuroc(n, cfg.min_feedback)
+        return DelayedAuroc(n, cfg.min_feedback, n_agree=n_agree)
     y = np.array([[int(lab[c]) for c in classes] for lab in feedback["labels"]])
     p = np.array([[float(pr[c]) for c in classes] for pr in feedback["probabilities"]])
     result = bootstrap_auroc(y, p, n_boot=cfg.bootstrap_samples, seed=cfg.seed)
     if not math.isfinite(result.macro):
-        return DelayedAuroc(n, cfg.min_feedback)
+        return DelayedAuroc(n, cfg.min_feedback, n_agree=n_agree)
     per_class = {
         c: {
             "auroc": _finite(result.auroc[k]),
@@ -265,6 +280,7 @@ def delayed_auroc(
         macro=result.macro,
         macro_ci=percentile_ci(result.boot_macro, cfg.confidence),
         per_class=per_class,
+        n_agree=n_agree,
     )
 
 

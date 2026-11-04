@@ -79,6 +79,7 @@ def test_windows_feedback_and_drift_reports_fit_the_backend_tables() -> None:
         feedback = db.read_feedback(url, model, now - timedelta(days=1))
         assert len(feedback) == 1
         assert feedback.iloc[0]["labels"] == {"Effusion": 0, "Mass": 1}
+        assert feedback.iloc[0]["verdict"] == "correct"
         assert feedback.iloc[0]["probabilities"] == {"Effusion": 0.4, "Mass": 0.4}
 
         assert db.latest_drift_report(url, model, "3") is None

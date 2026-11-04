@@ -2,6 +2,7 @@
 in the admin."""
 
 import io
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import pydicom
 import pytest
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import Client
 from pydicom.dataset import FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid
@@ -105,6 +107,61 @@ def test_unreadable_dicom_header_still_uploads(
     assert response.json()["metadata"]["view_position"] == ""
 
 
+def _dicom_header_end(body: bytes) -> int:
+    """Where the file meta group ends: its length is the UL value at byte 140."""
+    return 144 + int.from_bytes(body[140:144], "little")
+
+
+def _malformed_headers() -> dict[str, bytes]:
+    body = _dicom(ViewPosition="AP")
+    meta = body[: _dicom_header_end(body)]
+    modality = b"\x08\x00\x60\x00CS\x02\x00CR"
+    nested = b""
+    for _ in range(3000):
+        nested = (
+            b"\x08\x00\x40\x11SQ\x00\x00\xff\xff\xff\xff"
+            + b"\xfe\xff\x00\xe0\xff\xff\xff\xff"
+            + nested
+            + b"\xfe\xff\x0d\xe0\x00\x00\x00\x00"
+            + b"\xfe\xff\xdd\xe0\x00\x00\x00\x00"
+        )
+    return {
+        "group length cut short": body[:141],
+        "file meta cut short": body[:152],
+        "unknown VR on a tag we read": meta + modality + b"\x18\x00\x01\x51C\x85\x02\x00AP",
+        "sequences nested too deep": meta + nested,
+    }
+
+
+@pytest.mark.parametrize("case", list(_malformed_headers()))
+def test_malformed_dicom_header_still_uploads(
+    client: Client, s3: FakeS3, queued: list[tuple[str, str]], case: str
+) -> None:
+    """Whatever pydicom raises, the job is created and the worker decides what the file is."""
+    response = upload(client, _malformed_headers()[case], name="broken.dcm")
+    assert response.status_code == 202
+    assert response.json()["metadata"] == {
+        "patient_sex": "",
+        "patient_age": None,
+        "view_position": "",
+    }
+    assert len(queued) == 1
+
+
+def test_jobs_insert_without_the_metadata_columns() -> None:
+    """Code from before Phase 4 doesn't set them, so a rollback needs database defaults."""
+    job_id = uuid.uuid4()
+    with connection.cursor() as cur:
+        cur.execute(
+            """INSERT INTO inference_jobs (id, status, filename, format, size_bytes, sha256,
+                                           raw_key, error, created_at)
+               VALUES (%s, 'queued', 'x.png', 'png', 1, 'x', 'k', '', %s)""",
+            [job_id.hex, datetime.now(UTC)],
+        )
+    job = InferenceJob.objects.get(id=job_id)
+    assert (job.patient_sex, job.patient_age, job.view_position) == ("", None, "")
+
+
 def test_result_stores_the_embedding(finished_job: Callable[..., str]) -> None:
     job_id = finished_job(embedding=[0.5, 1.25, 0.0])
     assert Prediction.objects.get(job_id=job_id).embedding == [0.5, 1.25, 0.0]
@@ -150,6 +207,7 @@ def _report(uri: str = "s3://artifacts/monitoring/cxr-classifier/2/20261101T0000
                 "min_n": 30,
                 "macro": 0.8,
                 "macro_ci": [0.7, 0.9],
+                "n_agree": 10,
             },
         },
         report_uri=uri,
@@ -171,7 +229,7 @@ def test_admin_lists_and_shows_drift_reports(staff: Client) -> None:
 
     page = staff.get(f"/admin/monitoring/driftreport/{report.pk}/change/").content.decode()
     assert "0.710" in page
-    assert "macro 0.800 (95% CI 0.700 to 0.900), n = 40" in page
+    assert "macro 0.800 (95% CI 0.700 to 0.900), n = 40, 10 of them &quot;agree&quot;" in page
 
 
 def test_admin_streams_the_report_sandboxed(staff: Client, s3: FakeS3) -> None:

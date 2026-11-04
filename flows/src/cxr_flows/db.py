@@ -223,7 +223,8 @@ ORDER BY model_version, created_at
 
 # The latest answer per job: a reviewer may correct their own feedback.
 _FEEDBACK = """
-SELECT DISTINCT ON (f.job_id) f.job_id, p.model_version, f.labels, p.probabilities, f.created_at
+SELECT DISTINCT ON (f.job_id)
+       f.job_id, p.model_version, f.verdict, f.labels, p.probabilities, f.created_at
 FROM feedback f JOIN predictions p ON p.job_id = f.job_id
 WHERE p.model_name = %s AND f.created_at >= %s
 ORDER BY f.job_id, f.created_at DESC, f.id DESC
@@ -233,7 +234,7 @@ WINDOW_COLUMNS = (
     "job_id", "model_version", "created_at", "probabilities", "embedding",
     "patient_sex", "patient_age", "view_position",
 )  # fmt: skip
-FEEDBACK_COLUMNS = ("job_id", "model_version", "labels", "probabilities", "created_at")
+FEEDBACK_COLUMNS = ("job_id", "model_version", "verdict", "labels", "probabilities", "created_at")
 
 
 def read_windows(url: str, model_name: str, since: datetime, limit: int) -> pd.DataFrame:

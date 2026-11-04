@@ -151,6 +151,7 @@ def _feedback(n: int, rng: np.random.Generator, signal: float) -> pd.DataFrame:
     p = 1 / (1 + np.exp(-(signal * (y - 0.5) + rng.normal(0, 1, y.shape))))
     return pd.DataFrame(
         {
+            "verdict": ["correct"] * n,
             "labels": [{c: int(y[i, k]) for k, c in enumerate(CLASSES)} for i in range(n)],
             "probabilities": [{c: float(p[i, k]) for k, c in enumerate(CLASSES)} for i in range(n)],
         }
@@ -162,6 +163,7 @@ def test_delayed_auroc_is_not_reported_below_the_minimum(cfg: MonitorConfig) -> 
     assert not perf.reported
     assert perf.to_dict() == {
         "reported": False, "n": 19, "min_n": 20, "macro": None, "macro_ci": None, "per_class": {},
+        "n_agree": 0,
     }  # fmt: skip
 
 
@@ -178,6 +180,26 @@ def test_delayed_auroc_without_any_defined_class_is_not_reported(cfg: MonitorCon
     fb["labels"] = [dict.fromkeys(CLASSES, 0)] * 30  # every reviewer said "nothing"
     perf = drift.delayed_auroc(fb, CLASSES, cfg)
     assert not perf.reported and perf.n == 30
+
+
+def test_all_agree_feedback_scores_perfectly_and_says_so(cfg: MonitorConfig) -> None:
+    """An "agree" is the model's own thresholded output, so 1.0 here says nothing about quality:
+    the share is what lets a reader tell."""
+    fb = _feedback(100, np.random.default_rng(0), 0)  # probabilities carry no signal
+    fb["verdict"] = "agree"
+    fb["labels"] = [{c: int(p[c] >= 0.5) for c in CLASSES} for p in fb["probabilities"]]
+    perf = drift.delayed_auroc(fb, CLASSES, cfg)
+    assert perf.macro == 1.0
+    assert perf.n_agree == 100 and perf.agree_share == 1.0
+
+
+def test_agree_share_counts_the_verdicts(cfg: MonitorConfig) -> None:
+    fb = _feedback(40, np.random.default_rng(0), 3)
+    fb.loc[:9, "verdict"] = "agree"
+    assert drift.delayed_auroc(fb, CLASSES, cfg).agree_share == 0.25
+    # Known below the minimum too, and undefined with no feedback at all.
+    assert drift.delayed_auroc(fb.head(5), CLASSES, cfg).agree_share == 1.0
+    assert drift.delayed_auroc(fb.head(0), CLASSES, cfg).agree_share is None
 
 
 def test_fingerprint_ignores_order() -> None:

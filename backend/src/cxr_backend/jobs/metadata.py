@@ -13,7 +13,6 @@ from dataclasses import dataclass, replace
 from typing import IO
 
 import pydicom
-from pydicom.errors import InvalidDicomError
 
 logger = logging.getLogger(__name__)
 
@@ -53,20 +52,25 @@ def normalize(
 
 def from_dicom(file: IO[bytes]) -> ImageMetadata:
     """Header tags only (no pixel data); empty metadata if the header can't be read. Leaves
-    the file position where it was."""
+    the file position where it was.
+
+    Catches everything: on a malformed upload pydicom raises many types (struct.error,
+    NotImplementedError, BytesLengthException, RecursionError), some only when a tag is read.
+    Metadata is optional, so a bad header never fails the upload; the worker judges the file.
+    """
     position = file.tell()
     try:
         ds = pydicom.dcmread(file, stop_before_pixels=True)
-    except (InvalidDicomError, OSError, ValueError, EOFError) as exc:
-        logger.info("no metadata from DICOM header: %s", exc)
+        return normalize(
+            patient_sex=str(ds.get("PatientSex", "") or ""),
+            patient_age=str(ds.get("PatientAge", "") or ""),
+            view_position=str(ds.get("ViewPosition", "") or ""),
+        )
+    except Exception as exc:
+        logger.info("no metadata from DICOM header: %s: %s", type(exc).__name__, exc)
         return ImageMetadata()
     finally:
         file.seek(position)
-    return normalize(
-        patient_sex=str(ds.get("PatientSex", "") or ""),
-        patient_age=str(ds.get("PatientAge", "") or ""),
-        view_position=str(ds.get("ViewPosition", "") or ""),
-    )
 
 
 def _age(value: int | str | None) -> int | None:

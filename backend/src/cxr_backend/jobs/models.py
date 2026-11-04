@@ -31,10 +31,15 @@ class InferenceJob(models.Model):
     sha256 = models.CharField(max_length=64)
     raw_key = models.CharField(max_length=512, help_text="Key in the inference bucket")
     # For metadata drift (jobs/metadata.py): from the upload's form fields, else the DICOM
-    # header; blank / null when neither has them.
-    patient_sex = models.CharField(max_length=1, blank=True, help_text="M, F, or blank")
+    # header; blank / null when neither has them. The database defaults let code from before
+    # these columns keep inserting jobs, so a rollback doesn't have to reverse the migration.
+    patient_sex = models.CharField(
+        max_length=1, blank=True, db_default="", help_text="M, F, or blank"
+    )
     patient_age = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Years")
-    view_position = models.CharField(max_length=16, blank=True, help_text="PA, AP, ...")
+    view_position = models.CharField(
+        max_length=16, blank=True, db_default="", help_text="PA, AP, ..."
+    )
     error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     finished_at = models.DateTimeField(null=True, blank=True)

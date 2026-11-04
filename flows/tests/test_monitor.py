@@ -63,7 +63,7 @@ def _run(cfg: MonitorConfig, rows: pd.DataFrame, feedback: pd.DataFrame | None =
          stamp: str = "t1") -> monitor.VersionReport:  # fmt: skip
     return monitor.monitor_version(
         cfg=cfg, url="db", client=None, version="2", champion="2", rows=rows,  # type: ignore[arg-type]
-        feedback=feedback if feedback is not None else pd.DataFrame(columns=["labels"]),
+        feedback=feedback if feedback is not None else pd.DataFrame(columns=["verdict", "labels"]),
         stamp=stamp, flow_run_id="run-1",
     )  # fmt: skip
 
@@ -131,7 +131,8 @@ def test_metrics_carry_scores_thresholds_auroc_and_the_heartbeat(cfg: MonitorCon
         drift_detected=True,
         delayed_auroc=DelayedAuroc(40, 20, macro=0.8, macro_ci=(0.7, 0.9),
                                    per_class={"Mass": {"auroc": 0.75, "ci": [0.6, 0.9]},
-                                              "Effusion": {"auroc": None, "ci": None}}),
+                                              "Effusion": {"auroc": None, "ci": None}},
+                                   n_agree=10),
     )  # fmt: skip
     quiet = monitor.VersionReport("1", False, 12, delayed_auroc=DelayedAuroc(5, 20))
     text = _metrics(monitor.build_metrics([judged, quiet], cfg, "2", 1_000.0, 2.5))
@@ -144,6 +145,8 @@ def test_metrics_carry_scores_thresholds_auroc_and_the_heartbeat(cfg: MonitorCon
         'cxr_delayed_auroc{class_name="macro",model_version="2"} 0.8',
         'cxr_delayed_auroc_ci_lower{class_name="Mass",model_version="2"} 0.6',
         'cxr_delayed_auroc_labeled{model_version="1"} 5.0',
+        'cxr_delayed_auroc_agree_share{model_version="2"} 0.25',
+        'cxr_delayed_auroc_agree_share{model_version="1"} 0.0',
         'cxr_monitor_champion{model_version="2"} 1.0',
         "cxr_monitor_interval_seconds 300.0",
         "cxr_monitor_last_success_timestamp_seconds 1000.0",

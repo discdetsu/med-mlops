@@ -215,6 +215,9 @@ def build_metrics(
                   ["model_version", "class_name"], registry=reg)  # fmt: skip
     labeled = Gauge("cxr_delayed_auroc_labeled", "Labeled predictions behind the delayed AUROC",
                     ["model_version"], registry=reg)  # fmt: skip
+    agree_share = Gauge("cxr_delayed_auroc_agree_share",
+                        'Share of the labels that are "agree": the model scored against itself',
+                        ["model_version"], registry=reg)  # fmt: skip
     Gauge("cxr_delayed_auroc_min_labeled", "Labeled predictions needed to report AUROC",
           registry=reg).set(cfg.min_feedback)  # fmt: skip
     if champion is not None:
@@ -239,6 +242,8 @@ def build_metrics(
         if perf is None:
             continue
         labeled.labels(r.model_version).set(perf.n)
+        if perf.agree_share is not None:
+            agree_share.labels(r.model_version).set(perf.agree_share)
         if not perf.reported:
             continue
         rows: list[tuple[str, float | None, Any]] = [("macro", perf.macro, perf.macro_ci)]
@@ -326,8 +331,9 @@ def _log_report(r: VersionReport) -> None:
         if perf.reported and perf.macro is not None:
             ci = perf.macro_ci
             ci_text = f" (95% CI {ci[0]:.3f} to {ci[1]:.3f})" if ci else ""
-            logger.info("version %s: delayed macro AUROC %.3f%s from %d labeled predictions",
-                        r.model_version, perf.macro, ci_text, perf.n)  # fmt: skip
+            logger.info("version %s: delayed macro AUROC %.3f%s from %d labeled predictions, "
+                        '%d of them "agree"',
+                        r.model_version, perf.macro, ci_text, perf.n, perf.n_agree)  # fmt: skip
         else:
             logger.info("version %s: %d labeled predictions, AUROC needs %d", r.model_version,
                         perf.n, perf.min_n)  # fmt: skip

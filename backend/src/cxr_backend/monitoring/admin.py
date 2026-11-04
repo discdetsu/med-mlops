@@ -89,7 +89,11 @@ class DriftReportAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
             )
         ci = perf["macro_ci"]
         ci_text = f" (95% CI {ci[0]:.3f} to {ci[1]:.3f})" if ci else ""
-        return format_html("macro {}{}, n = {}", f"{perf['macro']:.3f}", ci_text, perf["n"])
+        agree = perf.get("n_agree")  # absent from reports written before it was recorded
+        agree_text = "" if agree is None else f', {agree} of them "agree"'
+        return format_html(
+            "macro {}{}, n = {}{}", f"{perf['macro']:.3f}", ci_text, perf["n"], agree_text
+        )
 
     def get_urls(self) -> list[URLPattern]:
         view = self.admin_site.admin_view

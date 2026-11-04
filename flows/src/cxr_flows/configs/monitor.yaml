@@ -29,7 +29,8 @@ metadata_thresholds:
   patient_age: 0.3           # normed Wasserstein distance
 
 # Delayed AUROC from feedback: the latest answer per job from the last `feedback_window_days`.
-# Not reported below `min_feedback` labeled predictions.
+# Not reported below `min_feedback` labeled predictions. "agree" answers are the model's own
+# predictions, so read the AUROC with cxr_delayed_auroc_agree_share (ADR 0008).
 feedback_window_days: 30
 min_feedback: 30
 bootstrap_samples: 1000

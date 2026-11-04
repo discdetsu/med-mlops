@@ -793,7 +793,7 @@
       "id": 15,
       "type": "timeseries",
       "title": "Macro AUROC with 95% CI",
-      "description": "Not reported below min_feedback (30) labeled predictions.",
+      "description": "Read with \"Share of labels from agree\" below: the higher that share, the more optimistic this AUROC.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -952,7 +952,7 @@
       },
       "gridPos": {
         "h": 6,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 39
       },
@@ -1016,6 +1016,59 @@
           "refId": "B",
           "expr": "max(cxr_delayed_auroc_min_labeled)",
           "legendFormat": "needed"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Share of labels from \"agree\"",
+      "description": "\"agree\" answers are the model's own predictions, so they separate perfectly: the higher this is, the more optimistic the AUROC above. Near 100% the AUROC says nothing about the model (ADR 0008).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "cxr_delayed_auroc_agree_share{model_version=~\"$model_version\"}",
+          "legendFormat": "v{{model_version}}"
         }
       ],
       "options": {
