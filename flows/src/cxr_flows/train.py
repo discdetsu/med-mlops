@@ -7,7 +7,10 @@ against `@champion` (the `gate` flow).
 
 Without PREFECT_API_URL, Prefect 3 runs the flow against a temporary local server, so this
 works under the `core` profile; with it set (`make train PROFILE=full`), runs show up in the
-Prefect UI.
+Prefect UI. `should_retrain()` starts it through the `train/retrain` deployment (ADR 0009).
+
+Once data/curated exists, its `train` images are added to the NIH sample and its `recent` images
+are evaluated, never trained on: their patients' NIH images leave the training set too.
 """
 
 import argparse
@@ -29,13 +32,20 @@ from cxr_core.preprocess import PREPROCESS_VERSION
 from cxr_core.registry import MODEL_NAME
 from cxr_flows import golden as golden_set
 from cxr_flows.config import TrainConfig, load_config
-from cxr_flows.dataset import Split, load_split
+from cxr_flows.dataset import Split, load_split, merge_train, sample_train
 from cxr_flows.evaluate import choose_thresholds, evaluate, render_html
 from cxr_flows.export import ParityReport, export_onnx, run_parity
 from cxr_flows.gate import gate_flow
 from cxr_flows.reference import build_reference, write_reference
-from cxr_flows.registry import register
-from cxr_flows.schema import CLASSES, read_metadata, validate_versioned
+from cxr_flows.registry import register, request_auto_promote
+from cxr_flows.schema import (
+    CLASSES,
+    CURATED_RECENT,
+    CURATED_TRAIN,
+    read_metadata,
+    validate_curated,
+    validate_versioned,
+)
 from cxr_flows.settings import TRAIN_EXPERIMENT, Paths, require_mlflow_tracking_uri
 from cxr_flows.training import TrainResult, predict, train_model
 from cxr_flows.versioning import (
@@ -58,6 +68,7 @@ class PinnedData:
     nih: pd.DataFrame
     test_locked: pd.DataFrame
     golden: list[tuple[Path, str]]
+    curated: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +76,7 @@ class Splits:
     train: Split
     val: Split
     test: Split
+    recent: Split | None = None
 
 
 @task(cache_policy=NO_CACHE)
@@ -82,12 +94,15 @@ def validate_data(paths: Paths, expected_rev: str | None) -> PinnedData:
     nih, locked = validate_versioned(
         read_metadata(paths.nih), paths.nih, read_metadata(paths.test_locked), paths.test_locked
     )
+    curated = None
+    if paths.has_curated:
+        curated = validate_curated(read_metadata(paths.curated), paths.curated, nih, locked)
     manifest = golden_set.read_manifest(paths.golden)
     golden = [
         (paths.golden / f, i) for f, i in zip(manifest["file"], manifest["image_id"], strict=True)
     ]
     get_run_logger().info("dataset_rev %s: %s", rev, md5s)
-    return PinnedData(rev, md5s, nih, locked, golden)
+    return PinnedData(rev, md5s, nih, locked, golden, curated)
 
 
 @task(cache_policy=NO_CACHE)
@@ -95,19 +110,46 @@ def build_splits(paths: Paths, data: PinnedData, cfg: TrainConfig) -> Splits:
     cache = paths.cache
     nih_md5, locked_md5 = data.md5s["data/nih"], data.md5s["data/test_locked"]
     nih = data.nih
-    train_meta = nih[nih["split"] == "train"]
-    if cfg.max_train_images is not None and cfg.max_train_images < len(train_meta):
-        # Sample before preprocessing, so the cache only holds the images we train on.
-        train_meta = train_meta.sort_values("image_id").sample(
-            n=cfg.max_train_images, random_state=cfg.seed
-        )
+    train_meta = sample_train(nih[nih["split"] == "train"], cfg.max_train_images, cfg.seed)
     train = load_split(train_meta, paths.nih, nih_md5, "train", cfg.image_size, cache)
     val = load_split(nih[nih["split"] == "val"], paths.nih, nih_md5, "val", cfg.image_size, cache)
     test = load_split(
         data.test_locked, paths.test_locked, locked_md5, "test_locked", cfg.image_size, cache
     )
-    get_run_logger().info("train %d, val %d, test_locked %d", len(train), len(val), len(test))
-    return Splits(train, val, test)
+    recent = None
+    if data.curated is not None:
+        train, recent = _add_curated(paths, data, data.curated, train, cfg.image_size)
+    get_run_logger().info(
+        "train %d, val %d, test_locked %d, recent %d",
+        len(train), len(val), len(test), 0 if recent is None else len(recent),
+    )  # fmt: skip
+    return Splits(train, val, test, recent)
+
+
+def _add_curated(
+    paths: Paths, data: PinnedData, curated: pd.DataFrame, train: Split, image_size: int
+) -> tuple[Split, Split | None]:
+    """Curated `train` images join `train`; `recent` images stay out of it, patient and all."""
+    md5, nih_md5 = data.md5s["data/curated"], data.md5s["data/nih"]
+
+    def load(split: str) -> Split | None:
+        rows = curated[curated["split"] == split]
+        if rows.empty:
+            return None
+        return load_split(rows, paths.curated, md5, f"curated_{split}", image_size, paths.cache)
+
+    extra, recent = load(CURATED_TRAIN), load(CURATED_RECENT)
+    held_back = set(curated.loc[curated["split"] == CURATED_RECENT, "patient_id"])
+    if extra is None:
+        extra = train.head(0)
+    name = (
+        f"{md5.removesuffix('.dir')[:16]}-{nih_md5.removesuffix('.dir')[:16]}"
+        f"-p{PREPROCESS_VERSION}-s{image_size}"
+    )
+    merged = merge_train(
+        train, held_back, extra, paths.cache / "tensors" / "merged" / f"{name}.npy"
+    )
+    return merged, recent
 
 
 @task(cache_policy=NO_CACHE)
@@ -119,7 +161,7 @@ def train(cfg: TrainConfig, splits: Splits) -> TrainResult:
 def evaluate_model(
     cfg: TrainConfig, result: TrainResult, splits: Splits, out: Path
 ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
-    """Thresholds from val; reports on test_locked (and the recent slice, from Phase 5)."""
+    """Thresholds from val; reports on test_locked, val, and the recent slice when one exists."""
     batch = cfg.batch_size * 2
     val_probs = predict(result.model, splits.val.x, batch).probabilities
     thresholds = choose_thresholds(splits.val.y, val_probs, CLASSES)
@@ -139,9 +181,11 @@ def evaluate_model(
         )
 
     reports = {"test_locked": report(splits.test, test_probs), "val": report(splits.val, val_probs)}
-    # The recent slice (held-back reviewer labels) is evaluated here too once Phase 5 exports
-    # one; until then the report says so explicitly.
-    payload = {**reports, "recent": None}
+    if splits.recent is not None:
+        recent_probs = predict(result.model, splits.recent.x, batch).probabilities
+        reports["recent"] = report(splits.recent, recent_probs)
+    # Without a recent slice, the report says so explicitly.
+    payload = {"recent": None, **reports}
     (out / "evaluation.json").write_text(json.dumps(payload, indent=2) + "\n")
     (out / "evaluation.html").write_text(render_html("CXR evaluation", reports))
     return thresholds, reports
@@ -173,11 +217,15 @@ def train_flow(
     dataset_rev: str | None = None,
     register_model: bool = True,
     gate: bool = True,
+    promote: bool = False,
+    auto_promote: bool | None = None,
 ) -> str | None:
     """Returns the registered model version, or None with `register_model=False`.
 
     With `gate`, the new version is then gated against `@champion` and recorded as a
-    candidate for approval in Django admin.
+    candidate for approval in Django admin. `auto_promote` overrides gate.yaml's flag for this
+    run. `promote` asks the backend to approve the version if the gate marked it, which is what
+    `make train` does afterwards with `promote --auto`.
     """
     require_mlflow_tracking_uri()
     cfg = load_config(config)
@@ -204,7 +252,12 @@ def train_flow(
         tempfile.TemporaryDirectory() as tmp,
     ):
         mlflow.set_tags(lineage)
-        sizes = {"n_train": len(splits.train), "n_val": len(splits.val), "n_test": len(splits.test)}
+        sizes = {
+            "n_train": len(splits.train),
+            "n_val": len(splits.val),
+            "n_test": len(splits.test),
+            "n_recent": 0 if splits.recent is None else len(splits.recent),
+        }
         mlflow.log_params({**cfg.model_dump(exclude={"parity"}), **sizes})
         mlflow.log_dict(cfg.model_dump(), "config.json")
 
@@ -223,6 +276,10 @@ def train_flow(
         mlflow.log_metric("test_ece", test_report["ece"] or float("nan"))
         for c, m in test_report["classes"].items():
             mlflow.log_metric(f"test_auroc.{c}", m["auroc"] or float("nan"))
+        if "recent" in reports:
+            mlflow.log_metric(
+                "recent_macro_auroc", reports["recent"]["macro_auroc"] or float("nan")
+            )
 
         onnx_path = export(cfg, result, bundle)
         parity_report = parity(cfg, result, onnx_path, data)
@@ -269,7 +326,9 @@ def train_flow(
         )
     logger.info("registered %s version %s as @challenger", MODEL_NAME, version)
     if gate:
-        gate_flow(version=version)
+        outcome = gate_flow(version=version, auto_promote=auto_promote)
+        if promote and outcome is not None and outcome.passed:
+            logger.info("auto-promote: %s", request_auto_promote(version))
     return version
 
 

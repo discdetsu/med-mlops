@@ -140,9 +140,17 @@ def publish_report(
 
 
 @flow(name="gate", log_prints=True)
-def gate_flow(version: str | None = None, config: str = "gate") -> GateOutcome | None:
-    """Gate `version` (default: `@challenger`). None when there is nothing to compare."""
+def gate_flow(
+    version: str | None = None, config: str = "gate", auto_promote: bool | None = None
+) -> GateOutcome | None:
+    """Gate `version` (default: `@challenger`). None when there is nothing to compare.
+
+    `auto_promote` overrides gate.yaml's flag for this run, so the scripted demo can use it
+    without changing the default every other run relies on.
+    """
     cfg = load_gate_config(config)
+    if auto_promote is not None:
+        cfg = cfg.model_copy(update={"auto_promote": auto_promote})
     logger = get_run_logger()
     client = MlflowClient(require_mlflow_tracking_uri())
 

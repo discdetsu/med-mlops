@@ -7,6 +7,7 @@ new data version or a preprocessing change never reuses stale tensors.
 
 import os
 import shutil
+from collections.abc import Collection
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,41 @@ class Split:
 
     def head(self, n: int) -> Split:
         return Split(self.meta.iloc[:n].reset_index(drop=True), self.x[:n], self.y[:n])
+
+
+def sample_train(train_meta: pd.DataFrame, max_images: int | None, seed: int) -> pd.DataFrame:
+    """The train rows a config trains on. Reviewer labels are added after this sample, so they
+    don't change which NIH images it holds."""
+    if max_images is None or max_images >= len(train_meta):
+        return train_meta
+    # Sample before preprocessing, so the cache only holds the images we train on.
+    return train_meta.sort_values("image_id").sample(n=max_images, random_state=seed)
+
+
+def merge_train(base: Split, drop_patients: Collection[str], extra: Split, path: Path) -> Split:
+    """`base` without `drop_patients`, then `extra`, as one memory-mapped split at `path`.
+
+    Copying the cached tensors takes seconds, where re-preprocessing the images would take
+    minutes for every new curated revision.
+    """
+    keep = ~base.meta["patient_id"].isin(list(drop_patients)).to_numpy()
+    kept = np.flatnonzero(keep)
+    meta = pd.concat([base.meta[keep], extra.meta], ignore_index=True)
+    ids_path, ids = path.with_suffix(".ids"), "\n".join(meta["image_id"])
+    if not (path.exists() and ids_path.exists() and ids_path.read_text() == ids):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp.npy")
+        shape = (len(meta), *base.x.shape[1:])
+        out = open_memmap(tmp, mode="w+", dtype=np.float32, shape=shape)
+        for i, row in enumerate(kept):
+            out[i] = base.x[row]
+        for i in range(len(extra)):
+            out[len(kept) + i] = extra.x[i]
+        out.flush()
+        del out
+        shutil.move(tmp, path)
+        ids_path.write_text(ids)
+    return Split(meta, np.load(path, mmap_mode="r"), np.concatenate([base.y[keep], extra.y]))
 
 
 def load_split(
