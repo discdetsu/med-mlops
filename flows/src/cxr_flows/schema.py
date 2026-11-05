@@ -1,21 +1,29 @@
 """Canonical metadata schema shared by every DVC dataset path, and the checks that guard it.
 
 One row per image. The same columns appear in `data/nih/metadata.csv`,
-`data/test_locked/metadata.csv`, and later `data/curated/`, and are loaded into Postgres.
+`data/test_locked/metadata.csv`, and `data/curated/metadata.csv`, and are loaded into Postgres.
 """
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 import pandas as pd
+import pandera.errors
 import pandera.pandas as pa
+import pydicom
 from PIL import Image
+
+from cxr_core.preprocess import is_dicom
 
 # Chosen for enough positives in NIH ChestX-ray14 and for findings large enough to show
 # at the demo's 128 px; see docs/model-card.md.
 CLASSES = ("Atelectasis", "Cardiomegaly", "Effusion", "Mass", "Pneumothorax")
 
 SPLITS = ("train", "val", "test_locked")
+# data/curated (ADR 0009): `recent` is held back for evaluation and never trains.
+CURATED_TRAIN = "train"
+CURATED_RECENT = "recent"
+CURATED_SPLITS = (CURATED_TRAIN, CURATED_RECENT)
 LABEL_SOURCES = ("nih_nlp", "reviewer")
 VIEW_POSITIONS = ("PA", "AP")
 SEXES = ("M", "F")
@@ -71,7 +79,9 @@ def write_metadata(df: pd.DataFrame, dataset_dir: Path) -> Path:
 
 
 def metadata_schema(
-    splits: Collection[str] = SPLITS, image_root: Path | None = None
+    splits: Collection[str] = SPLITS,
+    image_root: Path | None = None,
+    extra_checks: Sequence[pa.Check] = (),
 ) -> pa.DataFrameSchema:
     """Schema for one dataset path. With `image_root`, every file must exist and match its
     recorded width and height (header read only, so it stays fast)."""
@@ -79,14 +89,15 @@ def metadata_schema(
         pa.Check(
             lambda df: df.groupby("patient_id")["split"].transform("nunique") == 1,
             error="patient appears in more than one split",
-        )
+        ),
+        *extra_checks,
     ]
     if image_root is not None:
         checks.append(
             pa.Check(
                 lambda df: pd.Series(
                     [
-                        _image_size(image_root / f) == (w, h)
+                        image_size(image_root / f) == (w, h)
                         for f, w, h in zip(df["file"], df["width"], df["height"], strict=True)
                     ],
                     index=df.index,
@@ -146,9 +157,69 @@ def validate_versioned(
     return nih, locked
 
 
-def _image_size(path: Path) -> tuple[int, int] | None:
+def validate_curated(
+    curated: pd.DataFrame, curated_dir: Path, nih: pd.DataFrame, locked: pd.DataFrame
+) -> pd.DataFrame:
+    """Validate data/curated. Its patients may also be in data/nih's train split, but must never
+    be in test_locked, and what it trains on must never be in val."""
+    curated = validate_dataset(curated, CURATED_SPLITS, curated_dir)
+    check_no_shared_patients({"data/curated": curated, "data/test_locked": locked})
+    check_no_shared_patients(
+        {
+            "data/curated train": curated[curated["split"] == CURATED_TRAIN],
+            "data/nih val": nih[nih["split"] == "val"],
+        }
+    )
+    return curated
+
+
+def partition_labels(
+    df: pd.DataFrame, locked_patients: Collection[str], image_root: Path
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """New labels → the rows that may enter data/curated, and why each of the others may not.
+
+    Any failed check quarantines only that row, by `image_id`, so one bad case never blocks the
+    others. Without a row index in the failure (a broken column), the whole batch raises: that is
+    a bug here, not bad data.
+    """
+    locked = frozenset(locked_patients)
+    schema = metadata_schema(
+        CURATED_SPLITS,
+        image_root,
+        [
+            pa.Check(
+                lambda frame: ~frame["patient_id"].isin(locked),
+                error="patient is in test_locked",
+            )
+        ],
+    )
+    df = df.reset_index(drop=True)
     try:
+        return schema.validate(df, lazy=True), {}
+    except pandera.errors.SchemaErrors as errors:
+        cases = errors.failure_cases
+    rows = pd.to_numeric(cases["index"], errors="coerce")
+    if rows.isna().any():
+        raise ValueError(f"labels can't be checked row by row:\n{cases[rows.isna()]}")
+    reasons: dict[str, set[str]] = {}
+    for row, context, column, check in zip(
+        rows.astype(int), cases["schema_context"], cases["column"], cases["check"], strict=True
+    ):
+        text = f"{column}: {check}" if context == "Column" else str(check)
+        reasons.setdefault(str(df.at[row, "image_id"]), set()).add(text)
+    keep = ~df["image_id"].isin(reasons)
+    return df[keep].reset_index(drop=True), {k: "; ".join(sorted(v)) for k, v in reasons.items()}
+
+
+def image_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) from the file's header, or None if it can't be read. Curated images are
+    uploads as they arrived, so unlike the NIH sets they may be DICOM. Catches everything: pydicom
+    raises many types on a malformed file, and one such file must not stop the other labels."""
+    try:
+        if is_dicom(path):
+            ds = pydicom.dcmread(path, stop_before_pixels=True)
+            return int(ds.Columns), int(ds.Rows)
         with Image.open(path) as img:
             return img.size
-    except OSError:
+    except Exception:
         return None

@@ -8,7 +8,9 @@ import pytest
 from cxr_flows.schema import (
     PatientLeakageError,
     check_no_shared_patients,
+    image_size,
     read_metadata,
+    validate_curated,
     validate_dataset,
     write_metadata,
 )
@@ -81,3 +83,36 @@ def test_patient_shared_with_test_locked_raises(rows: Any) -> None:
 
 def test_disjoint_patients_pass(rows: Any) -> None:
     check_no_shared_patients({"data/nih": rows(4), "data/test_locked": rows(4, "test_locked", 100)})
+
+
+def test_image_size_reads_png_and_dicom_headers(tmp_path: Path) -> None:
+    golden = Path(__file__).parents[2] / "data/golden"
+    png, dcm = golden / "png/00000001_000.png", golden / "dicom/00000001_000_monochrome1.dcm"
+    if not (png.exists() and dcm.exists()):
+        pytest.skip("golden set not pulled")
+    assert image_size(png) == image_size(dcm) == (1024, 1024)
+
+
+def test_image_size_of_a_bad_file_is_none(tmp_path: Path) -> None:
+    (tmp_path / "bad.png").write_bytes(b"not an image")
+    assert image_size(tmp_path / "bad.png") is None
+    assert image_size(tmp_path / "missing.png") is None
+    (tmp_path / "bad.dcm").write_bytes(b"\0" * 128 + b"DICM")
+    assert image_size(tmp_path / "bad.dcm") is None
+
+
+def test_curated_rows_may_share_patients_with_train_but_not_val_or_locked(rows: Any) -> None:
+    nih = rows(4)
+    nih.loc[2:, "split"] = "val"  # patient 0 in train, patient 1 in val
+    locked = rows(2, "test_locked", 500)
+
+    def curated(patient: str, split: str = "train") -> Any:
+        df = rows(1).assign(label_source="reviewer", split=split, patient_id=patient)
+        return df
+
+    validate_curated(curated("00000000"), None, nih, locked)  # type: ignore[arg-type]
+    validate_curated(curated("00000001", "recent"), None, nih, locked)  # type: ignore[arg-type]
+    with pytest.raises(PatientLeakageError, match="val"):
+        validate_curated(curated("00000001"), None, nih, locked)  # type: ignore[arg-type]
+    with pytest.raises(PatientLeakageError, match="test_locked"):
+        validate_curated(curated("00000500"), None, nih, locked)  # type: ignore[arg-type]
