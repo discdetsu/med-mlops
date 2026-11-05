@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from cxr_core.cam import class_activation_map
-from cxr_core.inference import FloatArray, run_onnx, sigmoid
+from cxr_core.inference import FloatArray, pool, run_onnx, sigmoid
 from cxr_core.preprocess import load_image, preprocess, resize
 from cxr_worker.model import LoadedModel
 
@@ -22,6 +22,7 @@ class Inference:
     probabilities: dict[str, float]
     display: FloatArray  # [0, 1], (h, w): the decoded image, windowed and downscaled
     heatmaps: dict[str, FloatArray]  # [0, 1], same (h, w) as display
+    embedding: list[float]  # pooled features, for the monitor flow's embedding drift
 
 
 def run_inference(model: LoadedModel, path: Path, display_size: int) -> Inference:
@@ -44,7 +45,14 @@ def run_inference(model: LoadedModel, path: Path, display_size: int) -> Inferenc
             c: class_activation_map(features[0], model.head_weight, k, size)
             for k, c in enumerate(manifest.classes)
         },
+        embedding=compact(pool(features)[0]),
     )
+
+
+def compact(values: FloatArray) -> list[float]:
+    """float32 values as JSON-friendly floats with 6 significant digits, the precision float32
+    has; repr of the widened double would add ~10 digits of noise per value."""
+    return [float(f"{v:.6g}") for v in values.tolist()]
 
 
 def display_shape(shape: tuple[int, ...], long_side: int) -> tuple[int, int]:

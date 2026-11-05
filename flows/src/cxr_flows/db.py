@@ -8,17 +8,26 @@ ADR 0005) use explicit names too, so new tables here must not reuse those.
 Promotion candidates: `model_candidates` is the exception. Django owns it (its migration
 creates it when the backend starts) because the admin reads and updates it before and after
 any gate runs; the gate flow only inserts rows (ADR 0007).
+
+Monitoring: the monitor flow reads the backend's `predictions`, `inference_jobs`, and `feedback`,
+and inserts into `drift_reports`, which Django owns for the same reason (ADR 0008).
 """
 
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import psycopg
 from psycopg.types.json import Jsonb
 
-from cxr_core.registry import CANDIDATES_TABLE, STATUS_GATE_FAILED, STATUS_PENDING
+from cxr_core.registry import (
+    CANDIDATES_TABLE,
+    DRIFT_REPORTS_TABLE,
+    STATUS_GATE_FAILED,
+    STATUS_PENDING,
+)
 from cxr_flows.schema import CLASSES
 
 DDL = """
@@ -188,6 +197,120 @@ def record_candidate(
             f"{CANDIDATES_TABLE} doesn't exist yet: the backend's migrations create it when it "
             "starts (`make up`)"
         ) from None
+
+
+# Each version's newest predictions since `since`, at most `limit` per version. The same file
+# uploaded twice counts once (its newest prediction): it is one observation, and a duplicate on
+# both sides of Evidently's train/test split lets the domain classifier memorize it, which reads
+# as embedding drift. Rows from workers older than Phase 4 have no embedding and are left out.
+_WINDOWS = """
+SELECT job_id, model_version, created_at, probabilities, embedding,
+       patient_sex, patient_age, view_position
+FROM (
+    SELECT *, row_number() OVER (PARTITION BY model_version ORDER BY created_at DESC) AS rank
+    FROM (
+        SELECT DISTINCT ON (p.model_version, j.sha256)
+               p.job_id, p.model_version, p.created_at, p.probabilities, p.embedding,
+               j.patient_sex, j.patient_age, j.view_position
+        FROM predictions p JOIN inference_jobs j ON j.id = p.job_id
+        WHERE p.model_name = %s AND p.created_at >= %s AND p.embedding IS NOT NULL
+        ORDER BY p.model_version, j.sha256, p.created_at DESC
+    ) unique_files
+) newest
+WHERE rank <= %s
+ORDER BY model_version, created_at
+"""
+
+# The latest answer per job: a reviewer may correct their own feedback.
+_FEEDBACK = """
+SELECT DISTINCT ON (f.job_id)
+       f.job_id, p.model_version, f.verdict, f.labels, p.probabilities, f.created_at
+FROM feedback f JOIN predictions p ON p.job_id = f.job_id
+WHERE p.model_name = %s AND f.created_at >= %s
+ORDER BY f.job_id, f.created_at DESC, f.id DESC
+"""
+
+WINDOW_COLUMNS = (
+    "job_id", "model_version", "created_at", "probabilities", "embedding",
+    "patient_sex", "patient_age", "view_position",
+)  # fmt: skip
+FEEDBACK_COLUMNS = ("job_id", "model_version", "verdict", "labels", "probabilities", "created_at")
+
+
+def read_windows(url: str, model_name: str, since: datetime, limit: int) -> pd.DataFrame:
+    """Prediction windows for every version of `model_name` (see `_WINDOWS`)."""
+    return _query(url, _WINDOWS, (model_name, since, limit), WINDOW_COLUMNS)
+
+
+def read_feedback(url: str, model_name: str, since: datetime) -> pd.DataFrame:
+    return _query(url, _FEEDBACK, (model_name, since), FEEDBACK_COLUMNS)
+
+
+def latest_drift_report(url: str, model_name: str, version: str) -> dict[str, Any] | None:
+    """The newest drift report row for the version, or None."""
+    sql = f"""
+        SELECT window_fingerprint, report, report_uri, drift_detected
+        FROM {DRIFT_REPORTS_TABLE}
+        WHERE model_name = %s AND model_version = %s
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    """
+    rows = _query(url, sql, (model_name, version), ("fingerprint", "report", "report_uri", "drift"))
+    return None if rows.empty else {str(k): v for k, v in rows.iloc[0].items()}
+
+
+_INSERT_DRIFT_REPORT = f"""
+INSERT INTO {DRIFT_REPORTS_TABLE} (
+    model_name, model_version, window_start, window_end, n_predictions, n_reference,
+    window_fingerprint, drift_detected, embedding_drift, prediction_drift, metadata_drift,
+    report, report_uri, prefect_flow_run_id, created_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+"""
+
+
+def record_drift_report(
+    url: str,
+    *,
+    model_name: str,
+    model_version: str,
+    window_start: datetime,
+    window_end: datetime,
+    n_predictions: int,
+    n_reference: int,
+    window_fingerprint: str,
+    drift_detected: bool,
+    embedding_drift: float | None,
+    prediction_drift: float | None,
+    metadata_drift: float | None,
+    report: Mapping[str, Any],
+    report_uri: str,
+    prefect_flow_run_id: str,
+) -> None:
+    row = (
+        model_name, model_version, window_start, window_end, n_predictions, n_reference,
+        window_fingerprint, drift_detected, embedding_drift, prediction_drift, metadata_drift,
+        Jsonb(dict(report)), report_uri, prefect_flow_run_id,
+    )  # fmt: skip
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(_INSERT_DRIFT_REPORT, row)
+    except psycopg.errors.UndefinedTable:
+        raise RuntimeError(_missing_backend_table(DRIFT_REPORTS_TABLE)) from None
+
+
+def _query(url: str, sql: str, params: tuple[Any, ...], columns: tuple[str, ...]) -> pd.DataFrame:
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    except psycopg.errors.UndefinedTable as exc:
+        raise RuntimeError(_missing_backend_table(str(exc).split('"')[1])) from None
+    return pd.DataFrame(rows, columns=list(columns))
+
+
+def _missing_backend_table(table: str) -> str:
+    return (
+        f"{table} doesn't exist yet: the backend's migrations create it when it starts (`make up`)"
+    )
 
 
 def _rows(df: pd.DataFrame) -> list[dict[str, Any]]:

@@ -197,6 +197,57 @@ def paired_bootstrap_auroc(
     return {name: PairedAuroc(int(masks[name].sum()), *points[name], *boot[name]) for name in masks}
 
 
+@dataclass(frozen=True)
+class BootstrapAuroc:
+    """Per-class AUROC of one model with bootstrap replicates over cases (or clusters)."""
+
+    n: int
+    auroc: npt.NDArray[np.float64]  # (K,)
+    boot: npt.NDArray[np.float64]  # (B, K)
+
+    @property
+    def macro(self) -> float:
+        """Mean over the classes whose AUROC is defined; NaN when none is."""
+        return _nanmean(self.auroc)
+
+    @property
+    def boot_macro(self) -> npt.NDArray[np.float64]:
+        defined = np.isfinite(self.boot)
+        counts = defined.sum(axis=1)
+        sums = np.where(defined, self.boot, 0.0).sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(counts > 0, sums / np.maximum(counts, 1), math.nan)
+
+
+def bootstrap_auroc(
+    y_true: Labels,
+    y_score: Scores,
+    *,
+    n_boot: int,
+    seed: int = 0,
+    clusters: npt.ArrayLike | None = None,
+) -> BootstrapAuroc:
+    """Per-class AUROC of one model on (N, K) labels, with `n_boot` bootstrap replicates.
+
+    The same weighted resampling as `paired_bootstrap_auroc`, for a single model: the monitor
+    flow's delayed AUROC from reviewer feedback.
+    """
+    paired = paired_bootstrap_auroc(
+        y_true, y_score, y_score, n_boot=n_boot, seed=seed, clusters=clusters
+    )["all"]
+    return BootstrapAuroc(paired.n, paired.a, paired.boot_a)
+
+
+def percentile_ci(values: npt.ArrayLike, confidence: float = 0.95) -> tuple[float, float] | None:
+    """Two-sided percentile interval of the finite values; None when there are none."""
+    v = np.asarray(values, dtype=np.float64)
+    finite = v[np.isfinite(v)]
+    if finite.size == 0:
+        return None
+    tail = (1.0 - confidence) / 2 * 100
+    return float(np.percentile(finite, tail)), float(np.percentile(finite, 100 - tail))
+
+
 class _RankedScores:
     """One class's labels and scores within one group, prepared once for weighted AUROC on
     many resamples: negatives sorted by score, and for each positive the number of negatives

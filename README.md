@@ -4,7 +4,7 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 3, registry + promotion.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+Status: **Phase 4, monitoring.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. Under the `full` profile, a scheduled monitor flow compares each version's recent predictions with its validation set, computes AUROC from reviewer feedback, and alerts through Prometheus to Discord or Slack. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
 
 ## Quickstart: upload → heatmap
 
@@ -34,7 +34,9 @@ make seed             # NIH subset from Kaggle → validate → DVC add + push �
 make train            # train → evaluate → ONNX → E2E parity → reference → @challenger → gate
 make gate VERSION=N   # re-run the promotion gate for a version (default: @challenger)
 make bootstrap-champion  # first model → @champion, seed bundle in dist/
-make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana
+make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana, monitor
+make monitor          # one monitor pass (PROFILE=full also pushes the scores to Prometheus)
+make test-rules       # promtool: Prometheus config check + alert rule unit tests
 make help             # all targets
 ```
 
@@ -58,6 +60,31 @@ make smoke            # repeat a few times: each prediction must come from versi
 make smoke            # predictions come from the previous champion again
 ```
 
+## Monitoring: drift → alert
+
+Under `make up PROFILE=full`, the `monitor` service runs the monitor flow every 5 minutes (it shows up in Prefect as the `monitor/monitor` deployment). For each model version, it takes the newest 200 predictions of the last hour, counting each uploaded file once, and compares them with that version's own drift reference with [Evidently](https://github.com/evidentlyai/evidently). The reference is its validation set, stored in its bundle. Three things are compared:
+
+- embeddings: can a classifier tell them apart (ROC AUC);
+- each class probability;
+- sex, age, and view, from the upload's form fields or its DICOM header.
+
+From 30 labeled predictions it also reports AUROC against reviewer feedback, with a bootstrap CI. Scores go to Prometheus through the Pushgateway, each report to Django admin under **Monitoring → Drift reports** (with the full Evidently page), and alerts to Discord or Slack. It never retrains: Phase 5 retrains on new labels. Thresholds live in [`monitor.yaml`](flows/src/cxr_flows/configs/monitor.yaml), and [ADR 0008](docs/adr/0008-monitoring-drift-and-alerts.md) has the reasoning and the calibration.
+
+Grafana (http://localhost:3000, `admin` / `GRAFANA_ADMIN_PASSWORD`) has three provisioned dashboards: **CXR · Serving** (API and workers), **CXR · Queue** (RabbitMQ, DLQ), and **CXR · Model** (per version: what serves, drift against thresholds, delayed AUROC). Alerts: API error rate, backend down, no worker, non-empty DLQ, drift above threshold, and a stale or never-run monitor. To get them in a channel, set `DISCORD_WEBHOOK_URL` or `SLACK_WEBHOOK_URL` in `.env` before `make up`; without either, they are listed at http://localhost:9093.
+
+The drift demo needs the NIH images on disk (`make seed` or `dvc pull data/nih`) and a `@champion`:
+
+```sh
+make up PROFILE=full
+make replay ARGS="--n 150 --feedback 0.4"   # validation images with NIH metadata; NIH labels as feedback
+make inject-drift ARGS="--n 200"            # AP views only (37% of the reference)
+# within 5 minutes, or right away with `make monitor PROFILE=full`:
+#   CXR · Model shows embedding and view drift above threshold, and CxrDriftDetected is sent
+docker compose --profile full stop monitor  # CxrMonitorStale fires about 16 minutes later
+```
+
+Checked on 2026-11-01 against the `full` stack with the v2 champion. 150 validation images scored embedding 0.48 (threshold 0.6) and view 0.006 (threshold 0.2), with no drift. Their 45 labels gave a delayed macro AUROC of 0.64 (95% CI 0.51 to 0.82). Then 200 AP views scored embedding 0.76 and view 0.54, and both `CxrDriftDetected` alerts reached the webhook. With the monitor stopped, `CxrMonitorStale` fired after 16 minutes. A pass takes about 10 s on a laptop CPU.
+
 `make up` copies `.env.example` to `.env` on first run. Change the passwords there for anything other than a local demo.
 
 | Service | URL | Profile |
@@ -72,8 +99,9 @@ make smoke            # predictions come from the previous champion again
 | Grafana | http://localhost:3000 | full |
 | Prometheus | http://localhost:9090 | full |
 | Alertmanager | http://localhost:9093 | full |
+| Pushgateway | http://localhost:9091 | full |
 
-All ports bind to `127.0.0.1` only. Django has no published port: browsers reach it through Nginx, and its `/internal` API (for workers) and `/metrics` stay on the compose network.
+All ports bind to `127.0.0.1` only. Django has no published port: browsers reach it through Nginx, and its `/internal` API (for workers) and `/metrics` stay on the compose network, as do the workers' `/metrics` and the `monitor` service.
 
 ## Repository layout
 
@@ -84,17 +112,21 @@ compose/               config mounted into compose services (one folder per serv
   rabbitmq/              plugins, model.events fanout, dlx → dlq, dead-letter policy
   mlflow/                MLflow server image (Postgres backend, RustFS artifacts)
   nginx/                 gateway: UI, /api, /admin; rate and upload limits
-  prometheus/ alertmanager/ grafana/
+  prometheus/            scrape config, alert rules (rules/), promtool tests (tests/)
+  alertmanager/          receiver template + entrypoint: Discord or Slack webhook from .env
+  grafana/               provisioning and the three dashboards as JSON
 packages/cxr_core/     shared preprocess / ONNX inference / CAM / metrics / bundle / registry names
                        (numpy only); model factory behind [train]
 backend/               Django + Ninja: jobs, feedback, registry (champion, seed_model, promotion
-                       admin), monitoring
+                       admin), monitoring (/metrics, drift reports in admin)
 worker/                Celery ONNX inference worker, no Django, no torch
-flows/                 Prefect flows: ingest, train, promotion (gate); monitor later
-  src/cxr_flows/configs/ training profiles (demo, full) and gate.yaml
+flows/                 Prefect flows: ingest, train, promotion (gate), monitor (drift + delayed
+                       AUROC); Dockerfile builds the monitor service, without torch
+  src/cxr_flows/configs/ training profiles (demo, full), gate.yaml, monitor.yaml
 frontend/              Svelte + Vite UI, built into the nginx image
 data/                  DVC-tracked datasets; only .dvc pointers are committed
-scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wait_healthy.sh
+scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wait_healthy.sh,
+                       replay_traffic.py, inject_drift.py
 tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
 docs/model-card.md     data, classes, metrics, limitations

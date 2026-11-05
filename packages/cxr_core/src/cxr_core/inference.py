@@ -30,3 +30,12 @@ def run_onnx(session: OnnxSession, x: FloatArray) -> tuple[FloatArray, FloatArra
 
 def sigmoid(logits: FloatArray) -> FloatArray:
     return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+
+
+def pool(features: FloatArray) -> FloatArray:
+    """(N, C, h, w) `features` → (N, C) embeddings: the GAP step, as `CamModel.pool` does it.
+
+    The drift reference stores these for the validation set; the worker reports one per
+    prediction, so the monitor flow compares like with like.
+    """
+    return features.mean(axis=(2, 3), dtype=np.float32)

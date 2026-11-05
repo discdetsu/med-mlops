@@ -1,0 +1,37 @@
+# Monitor flow (ADR 0008): drift of recent predictions against each model version's drift
+# reference (its validation set), and delayed AUROC from reviewer feedback. It alerts through
+# Prometheus; it never retrains (Phase 5 retrains on new labels, not on drift).
+
+# How often `python -m cxr_flows.monitor serve` runs the flow. The stale alert fires when the
+# last success is older than 3 intervals; the flow pushes this value so the rule follows it.
+interval_seconds: 300
+
+# The window per model version: its most recent `window_size` predictions from the last
+# `max_window_age_minutes`. Drift is not judged on fewer than `min_window_size`; the scores
+# then disappear from Prometheus and any drift alert resolves.
+window_size: 200
+max_window_age_minutes: 60
+min_window_size: 100
+
+# Reference rows compared against, sampled once per version with `seed` so successive windows
+# are scored against the same rows.
+reference_sample: 3000
+seed: 0
+
+# Scores above these thresholds count as drift. Calibrated on the v2 champion: windows of 100
+# images sampled at random from the train split (other patients, same distribution) vs AP
+# views only (ADR 0008 has the numbers).
+embedding_threshold: 0.6     # Evidently's domain classifier ROC AUC; 0.5 = indistinguishable
+prediction_threshold: 0.3    # normed Wasserstein distance per class probability
+metadata_thresholds:
+  view_position: 0.2         # Jensen-Shannon distance
+  patient_sex: 0.2           # Jensen-Shannon distance
+  patient_age: 0.3           # normed Wasserstein distance
+
+# Delayed AUROC from feedback: the latest answer per job from the last `feedback_window_days`.
+# Not reported below `min_feedback` labeled predictions. "agree" answers are the model's own
+# predictions, so read the AUROC with cxr_delayed_auroc_agree_share (ADR 0008).
+feedback_window_days: 30
+min_feedback: 30
+bootstrap_samples: 1000
+confidence: 0.95

@@ -15,6 +15,9 @@ dependencies = [
     "kagglehub>=0.3",
     "psycopg[binary]>=3.3",
     "pyyaml>=6",
+    "evidently>=0.7",
+    "prometheus-client>=0.26",
+    "boto3>=1.43",
 ]
 
 [build-system]

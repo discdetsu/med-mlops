@@ -20,8 +20,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.14.9-slim
 RUN useradd --system --uid 10001 --no-create-home app
 COPY --from=build /app/.venv /app/.venv
-ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 MODEL_CACHE_DIR=/tmp/cxr-models
+ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 MODEL_CACHE_DIR=/tmp/cxr-models \
+    WORKER_METRICS_PORT=9100
 USER app
+# Prometheus scrapes /metrics here (cxr_worker.metrics); not published to the host.
+EXPOSE 9100
 # The pool is set to solo in cxr_worker.app; see its docstring for why.
 CMD ["celery", "-A", "cxr_worker.app", "worker", "-Q", "inference", "--loglevel", "INFO", \
      "--without-gossip", "--without-mingle"]

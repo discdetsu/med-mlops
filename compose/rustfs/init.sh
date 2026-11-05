@@ -22,3 +22,15 @@ aws s3api put-bucket-lifecycle-configuration --bucket inference --lifecycle-conf
   }]
 }"
 echo "lifecycle rule applied: inference/raw/ expires after ${INFERENCE_RAW_RETENTION_DAYS} days"
+
+# Drift reports (one Evidently HTML of a few MB per changed window); rows in drift_reports keep
+# the scores after the HTML is gone.
+aws s3api put-bucket-lifecycle-configuration --bucket artifacts --lifecycle-configuration "{
+  \"Rules\": [{
+    \"ID\": \"expire-monitoring-reports\",
+    \"Status\": \"Enabled\",
+    \"Filter\": {\"Prefix\": \"monitoring/\"},
+    \"Expiration\": {\"Days\": ${MONITORING_REPORT_RETENTION_DAYS}}
+  }]
+}"
+echo "lifecycle rule applied: artifacts/monitoring/ expires after ${MONITORING_REPORT_RETENTION_DAYS} days"

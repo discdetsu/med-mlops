@@ -75,6 +75,36 @@ def test_job_reports_prediction_with_lineage_and_uploads_pngs(ctx: Context) -> N
     s3: FakeS3 = ctx.s3
     for key in [p["image_key"], *p["heatmap_keys"].values()]:
         assert s3.objects[("inference", key)].startswith(b"\x89PNG")
+    # The tiny model's features have 4 channels; the embedding is their spatial mean.
+    assert len(p["embedding"]) == 4
+    assert all(isinstance(v, float) for v in p["embedding"])
+
+
+def _sample(name: str, **labels: str) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+def test_jobs_and_the_served_version_are_counted(ctx: Context) -> None:
+    before = _sample("cxr_worker_jobs_total", outcome="succeeded")
+    durations = _sample("cxr_worker_job_duration_seconds_count", model_version="1")
+    assert run().successful()
+
+    assert _sample("cxr_worker_jobs_total", outcome="succeeded") == before + 1
+    assert _sample("cxr_worker_job_duration_seconds_count", model_version="1") == durations + 1
+    assert _sample("cxr_worker_model_info", model_name="cxr-classifier", model_version="1") == 1
+
+
+def test_failed_and_retried_jobs_are_counted(ctx: Context) -> None:
+    failed = _sample("cxr_worker_jobs_total", outcome="failed")
+    retried = _sample("cxr_worker_jobs_total", outcome="retried")
+    ctx.backend.fail_posts = 1  # type: ignore[attr-defined]
+    assert run().successful()
+    run(raw_key="raw/gone.png")
+
+    assert _sample("cxr_worker_jobs_total", outcome="retried") == retried + 1
+    assert _sample("cxr_worker_jobs_total", outcome="failed") == failed + 1
 
 
 def test_undecodable_image_fails_the_job_without_retrying(ctx: Context) -> None:
@@ -137,6 +167,8 @@ def test_model_event_swaps_the_model_between_jobs(ctx: Context) -> None:
         },
         message,
     )
+    assert _sample("cxr_worker_model_info", model_name="cxr-classifier", model_version="2") == 1
+    assert _sample("cxr_worker_model_info", model_name="cxr-classifier", model_version="1") == 0
     run()
 
     assert acked == [True]

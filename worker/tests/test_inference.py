@@ -27,6 +27,8 @@ def test_probabilities_follow_the_gap_linear_head(
     expected = 1 / (1 + np.exp(-logits))
     assert list(result.probabilities) == list(CLASSES)
     np.testing.assert_allclose(list(result.probabilities.values()), expected, rtol=1e-5)
+    # The reported embedding is that same mean(F), the vector the drift reference stores.
+    np.testing.assert_allclose(result.embedding, features[0].mean(axis=(1, 2)), rtol=1e-5)
 
 
 def test_display_and_heatmaps_keep_the_aspect_ratio(

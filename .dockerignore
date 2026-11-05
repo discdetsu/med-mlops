@@ -1,5 +1,5 @@
 # The Python images build from the repo root; data/ alone is tens of GB. Allowlist only
-# what `uv sync --package cxr-backend|cxr-worker` needs.
+# what `uv sync --package cxr-backend|cxr-worker|cxr-flows` needs.
 *
 !pyproject.toml
 !uv.lock
@@ -11,4 +11,5 @@
 !worker/pyproject.toml
 !worker/src
 !flows/pyproject.toml
+!flows/src
 **/__pycache__
