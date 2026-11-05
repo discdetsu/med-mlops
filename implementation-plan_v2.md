@@ -1,6 +1,6 @@
 # CXR MLOps Implementation Plan v2
 
-Last updated: 2026-11-01 · No deadlines: phases are ordered by dependency.
+Last updated: 2026-11-05 · No deadlines: phases are ordered by dependency.
 
 ## Goal and definition of done
 
@@ -180,17 +180,19 @@ The system sees infra health, drift, and real performance from feedback per `mod
 
 ## Phase 5: Labeling loop
 
-Close the loop: drifted cases and cases where the model and the radiologist disagree reach Label Studio, labels return as a new dataset version, and retraining starts only when there are enough new labels, not when drift appears.
+Close the loop: drifted cases and cases where the model and the radiologist disagree reach Label Studio, labels return as a new dataset version, and retraining starts only when there are enough new labels, not when drift appears. A new `patient_id` upload field (or the DICOM header) makes the locked test set checkable, and a `flows-worker` service runs the deployments on the repo itself (ADR 0009).
 
-- [ ] Multi-label Label Studio project matching the canonical classes, with storage pointing at the `inference` bucket, not the DVC remote (file names in the remote are hashes)
-- [ ] Monitor flow selects cases to label: (a) model disagrees with radiologist feedback, (b) top-k of drifted windows by embedding distance, (c) a small random sample to limit selection bias; creates tasks through the API without duplicates
-- [ ] Export job: Label Studio → `labels` table (`label_source=reviewer`) → write to `curated/` → `dvc add` + `dvc push` → `dataset_versions`
-- [ ] Protect the locked test set: Pandera checks that patients in new labels are not in `test_locked/`, and moves them to quarantine if they are
-- [ ] Hold back part of the new labels as the recent slice for evaluation, never for training
-- [ ] `should_retrain()`: new DVC rev and new labels ≥ N (config) → trigger the Prefect `train` deployment; log the decision whether or not it triggers
-- [ ] `make demo`: scripted loop that uses the real NIH labels in place of a reviewer (inject drift → tasks → auto-label → DVC rev → retrain → gate → `auto_promote`)
+- [x] Multi-label Label Studio project matching the canonical classes, with storage pointing at the `inference` bucket, not the DVC remote (file names in the remote are hashes)
+- [x] Monitor flow selects cases to label: (a) model disagrees with radiologist feedback, (b) top-k of drifted windows by embedding distance, (c) a small random sample to limit selection bias; creates tasks through the API without duplicates
+- [x] Export job: Label Studio → `labels` table (`label_source=reviewer`) → write to `curated/` → `dvc add` + `dvc push` → `dataset_versions`
+- [x] Protect the locked test set: Pandera checks that patients in new labels are not in `test_locked/`, and moves them to quarantine if they are
+- [x] Hold back part of the new labels as the recent slice for evaluation, never for training
+- [x] `should_retrain()`: new DVC rev and new labels ≥ N (config) → trigger the Prefect `train` deployment; log the decision whether or not it triggers
+- [x] `make demo`: scripted loop that uses the real NIH labels in place of a reviewer (inject drift → tasks → auto-label → DVC rev → retrain → gate → `auto_promote`)
 
 **Done when** `make demo` plays the whole loop with no clicks, and every step leaves evidence in Label Studio, MLflow, Django admin, and Grafana (**M3**).
+
+**Checked** on 2026-11-05 on a new, empty `full` stack in a separate Compose project on other host ports, seeded with the v2 bundle as version 1. `scripts/demo.py` ran two rounds of 200 AP views on a laptop CPU. Round 1: drift was detected (embedding 0.75, view 0.54), 65 cases went to Label Studio, the export made rev `c13360a8a3d7` with 53 new training labels and 12 in `recent`, and version 2 trained in `flows-worker`, passed the gate (macro ΔAUROC lower bound −0.005, ECE unchanged at 0.006), and was promoted by `auto_promote`. The script itself crashed on a bug while waiting for that retrain, since fixed; the run finished without it. Round 2 ran start to finish in 40 minutes and exited 0: 100 more cases, rev `d080e6c39b28`, 75 new labels counted from version 2 (the 25 in `recent` don't count), version 3 promoted, and the next upload was predicted by version 3 on that rev. No file got a second task (167 tasks, 167 files). Separately, a real `test_locked` patient and an upload without sex or view were quarantined with their reasons and reached neither `labels` nor `data/curated/`, and a half-written `data/curated/` was restored by the next export. Round 2 also showed 96 disagreements filling the task cap and leaving no random sample, so the cap now trims only disagreements; that change has unit tests and one live monitor pass (71 disagreements, 25 drift, 4 random), not a third full round. Not exercised: the `make demo` target itself (the test stack used other ports), a person labeling in the Label Studio UI (images were checked to load through its proxy), and the 15-minute schedule firing with new labels.
 
 ## Phase 6: Showcase polish
 
@@ -219,6 +221,7 @@ Tests arrive with the phase that builds what they test. Unit, schema, parity, an
 | API contract | Ninja endpoints, internal API auth | Every push | 2 |
 | Smoke | `core` up → seed model → upload golden image → result with `model_version` | Push to `main` | 2 |
 | Promotion | Approve → event → workers switch to vN, rollback (manual, see README); the gate's `model_candidates` insert against the real schema (integration) | Manual workflow | 3 |
+| Labeling | Selection, answers, curated split, `should_retrain()`, quarantine, Label Studio client against a fake (unit); task and decision SQL against the real schema (integration) | Every push | 5 |
 | Monitoring | Drift scores and delayed AUROC on synthetic windows (unit); the monitor's SQL against the real schema (integration); alert rules (promtool); replay → drift → alert, stop → stale (manual, see README) | Every push; manual | 4 |
 | Full loop | `make demo` | Before tagging a release | 5 |
 
@@ -246,7 +249,7 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 
 **Open decisions**
 
-- [ ] N for `should_retrain()`
+- [x] N for `should_retrain()`. Decided: 50 new training labels, a throttle on cost and not a statistical threshold (ADR 0009)
 - [x] The gate margin. Decided: 0.02 for both the macro bound and the subgroup point estimates; reasoning and the measured CI widths are in ADR 0007
 - [x] Which 5 to 6 classes to use. Decided: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax (see the model card)
 - [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
