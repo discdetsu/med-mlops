@@ -7,6 +7,7 @@ from pathlib import Path
 
 # Model name, aliases, and bucket names live in cxr_core.registry, shared with serving.
 TRAIN_EXPERIMENT = "cxr-train"
+INFERENCE_BUCKET = "inference"
 
 
 @dataclass(frozen=True)
@@ -40,9 +41,15 @@ class Paths:
         return self.data / "test_locked"
 
     @property
-    def versioned(self) -> tuple[Path, Path]:
-        """The paths a dataset_rev covers. golden is pinned too, but parity-only."""
-        return (self.nih, self.test_locked)
+    def versioned(self) -> tuple[Path, ...]:
+        """The paths a dataset_rev covers. golden is pinned too, but parity-only. curated counts
+        from its first export, so the data from before that keeps its rev."""
+        base = (self.nih, self.test_locked)
+        return (*base, self.curated) if self.has_curated else base
+
+    @property
+    def has_curated(self) -> bool:
+        return self.curated.with_name(self.curated.name + ".dvc").exists()
 
     @property
     def golden(self) -> Path:
@@ -51,7 +58,7 @@ class Paths:
 
     @property
     def curated(self) -> Path:
-        """Reviewer labels from Label Studio (Phase 5). The only place new labels may go."""
+        """Reviewer labels from Label Studio (ADR 0009). The only place new labels may go."""
         return self.data / "curated"
 
     @property

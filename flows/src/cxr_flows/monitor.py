@@ -17,8 +17,12 @@ Each pass, for every model version with recent predictions or feedback (ADR 0008
    `drift_reports` (Django admin lists them), and every score to the Pushgateway with
    `cxr_monitor_last_success_timestamp_seconds`. A failed pass pushes nothing, so the stale
    alert fires after three missed intervals.
+4. Cases for review go to Label Studio (`cxr_flows.labeling`, ADR 0009): predictions a reviewer
+   disagreed with, the farthest from the reference in windows that drifted, and a random sample.
+   Skipped without LABEL_STUDIO_URL; a Label Studio outage doesn't fail the pass, because the
+   stale alert means the monitor stopped, not that labeling did.
 
-It never starts a retrain: Phase 5 retrains on new labels, not on drift.
+It never starts a retrain: that takes new labels (`cxr_flows.label_export`), not drift.
 """
 
 import argparse
@@ -34,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import httpx
 import pandas as pd
 from mlflow import MlflowClient
 from prefect import flow, runtime, task
@@ -49,10 +54,12 @@ from cxr_core.registry import (
     drift_report_prefix,
     split_s3_uri,
 )
-from cxr_flows import db, drift
-from cxr_flows.config import MonitorConfig, load_monitor_config
+from cxr_flows import db, drift, labeling
+from cxr_flows.config import MonitorConfig, load_labeling_config, load_monitor_config
+from cxr_flows.labelstudio import LabelStudio, LabelStudioError, s3_settings
 from cxr_flows.registry import alias_version
-from cxr_flows.settings import app_database_url, require_mlflow_tracking_uri
+from cxr_flows.schema import CLASSES
+from cxr_flows.settings import INFERENCE_BUCKET, app_database_url, require_mlflow_tracking_uri
 
 PUSH_JOB = "cxr_monitor"
 
@@ -193,6 +200,70 @@ def monitor_version(
     return report
 
 
+@task(cache_policy=NO_CACHE)
+def send_to_labeling(
+    client: MlflowClient,
+    url: str,
+    config: str,
+    reports: list[VersionReport],
+    windows: pd.DataFrame,
+    feedback: pd.DataFrame,
+) -> int:
+    """Create Label Studio tasks for this pass's cases and return how many.
+
+    The lock and the task list cover the two ways a case could be sent twice: another pass running
+    at the same time, and one that crashed between creating tasks and recording them.
+    """
+    ls = LabelStudio.from_env()
+    if ls is None:
+        return 0
+    cfg = load_labeling_config(config)
+    new_windows = [
+        labeling.NewWindow(
+            windows[windows["model_version"] == r.model_version].reset_index(drop=True),
+            r.drift_detected,
+            load_reference(client, r.model_version),
+        )
+        for r in reports
+        if r.scores and not r.reused
+    ]
+    with db.labeling_lock(url):
+        hashes = set(feedback["sha256"]) | set(windows["sha256"])
+        cases = labeling.select_cases(feedback, new_windows, db.known_task_hashes(url, hashes), cfg)
+        if not cases:
+            return 0
+        project = ls.ensure_project(cfg.project_title, CLASSES, s3_settings(), INFERENCE_BUCKET)
+        existing = {str(t["data"].get("sha256")): t for t in ls.list_tasks(project)}
+        new = [c for c in cases if c.sha256 not in existing]
+        ids = ls.import_tasks(project, [task_data(c) for c in new]) if new else []
+        task_ids = dict(zip((c.sha256 for c in new), ids, strict=True))
+        task_ids |= {c.sha256: int(existing[c.sha256]["id"]) for c in cases if c not in new}
+        db.record_tasks(
+            url,
+            [
+                (c.sha256, c.job_id, MODEL_NAME, c.model_version, c.reason, task_ids[c.sha256])
+                for c in cases
+            ],
+        )
+    by_reason = pd.Series([c.reason for c in cases]).value_counts().to_dict()
+    logger.info("sent %d cases to Label Studio: %s", len(cases), by_reason)
+    return len(cases)
+
+
+def task_data(case: labeling.Case) -> dict[str, Any]:
+    """The display PNG the worker wrote, since a browser can't draw a raw DICOM. `sha256` is how a
+    later pass recognizes the task; the rest helps a reviewer's filters in the data manager."""
+    return {
+        "data": {
+            "image": f"s3://{INFERENCE_BUCKET}/{case.image_key}",
+            "sha256": case.sha256,
+            "job_id": case.job_id,
+            "reason": case.reason,
+            "model_version": case.model_version,
+        }
+    }
+
+
 def build_metrics(
     reports: list[VersionReport], cfg: MonitorConfig, champion: str | None, finished: float,
     duration_s: float,
@@ -277,7 +348,7 @@ def _version_key(version: str) -> tuple[int, int, str]:
 
 
 @flow(name="monitor", log_prints=True)
-def monitor_flow(config: str = "monitor") -> list[VersionReport]:
+def monitor_flow(config: str = "monitor", labeling_config: str = "labeling") -> list[VersionReport]:
     started = time.monotonic()
     cfg = load_monitor_config(config)
     url = app_database_url()
@@ -311,6 +382,10 @@ def monitor_flow(config: str = "monitor") -> list[VersionReport]:
     ]
     for r in reports:
         _log_report(r)
+    try:
+        send_to_labeling(client, url, labeling_config, reports, windows, feedback)
+    except (LabelStudioError, httpx.HTTPError) as exc:
+        logger.error("cases not sent to Label Studio; later passes select again: %s", exc)
     push_metrics(build_metrics(reports, cfg, champion, time.time(), time.monotonic() - started))
     return reports
 

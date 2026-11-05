@@ -1,6 +1,7 @@
 # Monitor flow (ADR 0008): drift of recent predictions against each model version's drift
 # reference (its validation set), and delayed AUROC from reviewer feedback. It alerts through
-# Prometheus; it never retrains (Phase 5 retrains on new labels, not on drift).
+# Prometheus; it never retrains. The cases it sends for review are set in labeling.yaml, and only
+# new labels start a retrain (ADR 0009).
 
 # How often `python -m cxr_flows.monitor serve` runs the flow. The stale alert fires when the
 # last success is older than 3 intervals; the flow pushes this value so the rule follows it.
