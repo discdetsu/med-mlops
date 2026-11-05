@@ -1,4 +1,5 @@
-"""Image metadata for metadata drift: patient sex, age, and view position.
+"""Image metadata: patient sex, age, and view position for metadata drift, and the patient ID
+for the labeling loop's check against the locked test set (ADR 0009).
 
 The monitor flow compares these with the drift reference (the validation set's NIH metadata),
 so they use the NIH vocabulary: sex `M` / `F`, age in years, view `PA` / `AP` (anything else is
@@ -17,6 +18,7 @@ import pydicom
 logger = logging.getLogger(__name__)
 
 MAX_AGE = 120
+MAX_PATIENT_ID = 64
 # DICOM AS: three digits and a unit, e.g. 045Y, 006M.
 _DICOM_AGE = re.compile(r"^(\d{1,3})([DWMY])$")
 
@@ -26,6 +28,7 @@ class ImageMetadata:
     patient_sex: str = ""
     patient_age: int | None = None
     view_position: str = ""
+    patient_id: str = ""
 
     def fill_from(self, other: ImageMetadata) -> ImageMetadata:
         """Fields missing here, taken from `other`."""
@@ -34,6 +37,7 @@ class ImageMetadata:
             patient_sex=self.patient_sex or other.patient_sex,
             patient_age=self.patient_age if self.patient_age is not None else other.patient_age,
             view_position=self.view_position or other.view_position,
+            patient_id=self.patient_id or other.patient_id,
         )
 
 
@@ -41,12 +45,14 @@ def normalize(
     patient_sex: str | None = None,
     patient_age: int | str | None = None,
     view_position: str | None = None,
+    patient_id: str | None = None,
 ) -> ImageMetadata:
     sex = (patient_sex or "").strip().upper()[:1]
     return ImageMetadata(
         patient_sex=sex if sex in ("M", "F") else "",
         patient_age=_age(patient_age),
         view_position=(view_position or "").strip().upper()[:16],
+        patient_id=_patient_id(patient_id),
     )
 
 
@@ -65,12 +71,19 @@ def from_dicom(file: IO[bytes]) -> ImageMetadata:
             patient_sex=str(ds.get("PatientSex", "") or ""),
             patient_age=str(ds.get("PatientAge", "") or ""),
             view_position=str(ds.get("ViewPosition", "") or ""),
+            patient_id=str(ds.get("PatientID", "") or ""),
         )
     except Exception as exc:
         logger.info("no metadata from DICOM header: %s: %s", type(exc).__name__, exc)
         return ImageMetadata()
     finally:
         file.seek(position)
+
+
+def _patient_id(value: str | None) -> str:
+    """Blank rather than truncated when too long: a cut ID could name another patient."""
+    text = (value or "").strip()
+    return text if len(text) <= MAX_PATIENT_ID else ""
 
 
 def _age(value: int | str | None) -> int | None:

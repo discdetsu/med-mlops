@@ -266,7 +266,7 @@ def auto_promote(version: str | None = None, client: MlflowClient | None = None)
         return None
     return approve(
         candidate.pk,
-        reason="auto_promote is on in gate.yaml and the gate passed",
+        reason="auto_promote is on for this run and the gate passed",
         actor=AUTO_PROMOTE_ACTOR,
         client=client,
     )

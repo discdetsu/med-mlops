@@ -44,11 +44,12 @@ def create_job(
     patient_sex: Form[str | None] = None,
     patient_age: Form[str | None] = None,
     view_position: Form[str | None] = None,
+    patient_id: Form[str | None] = None,
 ) -> Status[JobOut | Error]:
     """Store the upload in `inference/raw/`, record a job, and queue it for a worker.
 
-    The optional form fields are the image's metadata, for metadata drift; for DICOM the
-    header fills in whatever they leave out.
+    The optional form fields are the image's metadata, for metadata drift and the labeling
+    loop; for DICOM the header fills in whatever they leave out.
     """
     size = file.size or 0
     if size == 0:
@@ -60,7 +61,7 @@ def create_job(
         return Status(415, Error(detail="expected a PNG, JPEG, or DICOM (Part 10) file"))
 
     file.seek(0)
-    meta = metadata.normalize(patient_sex, patient_age, view_position)
+    meta = metadata.normalize(patient_sex, patient_age, view_position, patient_id)
     if fmt == InferenceJob.Format.DICOM:
         meta = meta.fill_from(metadata.from_dicom(file))
     digest = hashlib.sha256()
@@ -86,6 +87,7 @@ def create_job(
         patient_sex=meta.patient_sex,
         patient_age=meta.patient_age,
         view_position=meta.view_position,
+        patient_id=meta.patient_id,
     )
     try:
         enqueue(str(job.id), raw_key)

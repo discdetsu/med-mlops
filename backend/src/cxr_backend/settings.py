@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     "cxr_backend.feedback",
     "cxr_backend.registry",
     "cxr_backend.monitoring",
+    "cxr_backend.labeling",
 ]
 
 MIDDLEWARE = [

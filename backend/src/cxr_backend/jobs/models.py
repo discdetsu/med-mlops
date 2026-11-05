@@ -40,6 +40,11 @@ class InferenceJob(models.Model):
     view_position = models.CharField(
         max_length=16, blank=True, db_default="", help_text="PA, AP, ..."
     )
+    # Not for metadata drift: a label can only enter the training data if its patient can be
+    # checked against the locked test set (ADR 0009). Never returned by the public API.
+    patient_id = models.CharField(
+        max_length=64, blank=True, db_default="", help_text="De-identified ID, or blank"
+    )
     error = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     finished_at = models.DateTimeField(null=True, blank=True)
