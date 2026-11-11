@@ -8,6 +8,7 @@ The flows around them are `cxr_flows.monitor` (selection) and `cxr_flows.label_e
 import hashlib
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import zip_longest
 from typing import Any
 
 import numpy as np
@@ -129,9 +130,10 @@ def select_cases(
     """Disagreements, the top-k of drifted windows, and a random sample of each new window, without
     any file already known or picked, up to `max_tasks_per_pass`.
 
-    The cap trims disagreements only, newest kept. They are selected again on the next pass; the
-    other two come from a window once, and the random sample is what limits selection bias, so a
-    flood of disagreements must not crowd them out.
+    The cap trims disagreements first, newest kept: they are selected again on the next pass, while
+    the other two come from a window once. Only when drift and the sample alone exceed it does
+    drift lose cases, each window's nearest first, and the random sample goes last, since it is
+    what limits selection bias.
     """
     chosen: dict[str, Case] = {}
 
@@ -144,24 +146,35 @@ def select_cases(
         ]
         return rows[keep].drop_duplicates("sha256")
 
-    def add(rows: pd.DataFrame, reason: str) -> None:
-        for r in rows.itertuples():
-            chosen[str(r.sha256)] = Case(
-                str(r.sha256), str(r.job_id), str(r.image_key), str(r.model_version), reason
-            )
+    def add(rows: pd.DataFrame, reason: str) -> list[Case]:
+        cases = [
+            Case(str(r.sha256), str(r.job_id), str(r.image_key), str(r.model_version), reason)
+            for r in rows.itertuples()
+        ]
+        chosen.update({c.sha256: c for c in cases})
+        return cases
 
-    add(usable(disagreements(feedback)), REASON_DISAGREEMENT)
-    for w in windows:
-        if w.drifted:
+    disagreeing = add(usable(disagreements(feedback)), REASON_DISAGREEMENT)
+    drift = _interleave(
+        [
             add(farthest(usable(w.rows), w.reference, cfg.top_k_drift), REASON_DRIFT)
-    for w in windows:
-        add(random_sample(usable(w.rows), cfg.random_k), REASON_RANDOM)
-    cases = list(chosen.values())
-    others = [c for c in cases if c.reason != REASON_DISAGREEMENT]
-    room = max(cfg.max_tasks_per_pass - len(others), 0)
-    return ([c for c in cases if c.reason == REASON_DISAGREEMENT][:room] + others)[
-        : cfg.max_tasks_per_pass
-    ]
+            for w in windows
+            if w.drifted
+        ]
+    )
+    sample = _interleave(
+        [add(random_sample(usable(w.rows), cfg.random_k), REASON_RANDOM) for w in windows]
+    )
+
+    cap = cfg.max_tasks_per_pass
+    sample = sample[:cap]
+    drift = drift[: cap - len(sample)]
+    return disagreeing[: cap - len(sample) - len(drift)] + drift + sample
+
+
+def _interleave(groups: Sequence[list[Case]]) -> list[Case]:
+    """Every group's first, then every group's second, so trimming the end treats windows alike."""
+    return [c for rank in zip_longest(*groups) for c in rank if c is not None]
 
 
 def parse_answer(

@@ -39,16 +39,11 @@ from cxr_flows import db
 from cxr_flows.config import load_config, load_labeling_config
 from cxr_flows.dataset import sample_train
 from cxr_flows.label_export import label_export_flow
-from cxr_flows.labelstudio import NONE_CHOICE, LabelStudio, s3_settings
+from cxr_flows.labelstudio import NONE_CHOICE, LabelStudio, ensure_review_project
 from cxr_flows.monitor import monitor_flow
 from cxr_flows.registry import alias_version, newest_version
 from cxr_flows.schema import CLASSES, read_metadata
-from cxr_flows.settings import (
-    INFERENCE_BUCKET,
-    Paths,
-    app_database_url,
-    require_mlflow_tracking_uri,
-)
+from cxr_flows.settings import Paths, app_database_url, require_mlflow_tracking_uri
 
 GOLDEN_IMAGE = "golden/png/00000001_000.png"
 
@@ -89,8 +84,7 @@ def label_with_nih(paths: Paths, url: str) -> int:
     if ls is None:
         fail("LABEL_STUDIO_URL is not set; run through `make demo`")
         raise AssertionError  # fail() exits
-    cfg = load_labeling_config()
-    project = ls.ensure_project(cfg.project_title, CLASSES, s3_settings(), INFERENCE_BUCKET)
+    project = ensure_review_project(ls, load_labeling_config().project_title)
     nih = read_metadata(paths.nih).set_index("image_id")
     unanswered = {int(t["id"]) for t in ls.list_tasks(project) if not t.get("annotations")}
     answered = 0
@@ -151,19 +145,24 @@ def main() -> None:
     reports = monitor_flow()
     current = next((r for r in reports if r.is_champion), None)
     if current is None or not current.drift_detected:
-        print("no drift this pass: only disagreements and the random sample become tasks")
+        fail("the monitor pass detected no drift on @champion. Run it again, or raise --n.")
     print(f"tasks so far: {db.task_counts(url)}")
 
-    step("3/6 Labeling: NIH labels stand in for a reviewer")
-    print(f"{label_with_nih(paths, url)} tasks answered in Label Studio")
+    # One lock across both steps: a scheduled export in between would take these answers and start
+    # the retrain without auto_promote.
+    with db.labeling_lock(url):
+        step("3/6 Labeling: NIH labels stand in for a reviewer")
+        print(f"{label_with_nih(paths, url)} tasks answered in Label Studio")
 
-    step("4/6 Export: labels → data/curated → new DVC rev → should_retrain()")
-    result = label_export_flow(auto_promote=True, min_new_labels=args.min_new_labels)
+        step("4/6 Export: labels → data/curated → new DVC rev → should_retrain()")
+        result = label_export_flow(
+            auto_promote=True, min_new_labels=args.min_new_labels, lock_held=True
+        )
     decision = result.decision
     print(f"dataset_rev {result.dataset_rev}: {result.exported} exported, "
           f"{result.quarantined} quarantined")  # fmt: skip
     if decision is None or not result.train_flow_run_id:
-        reason = decision.reason if decision else "nothing to export"
+        reason = decision.reason if decision else "nothing exported, or a retrain is still running"
         fail(f"no retrain: {reason}. Run it again for more labels, or lower --min-new-labels.")
     print(f"retrain started: {decision.reason}")
 

@@ -49,6 +49,7 @@ from cxr_core.bundle import REFERENCE_FILE
 from cxr_core.registry import (
     ARTIFACTS_BUCKET,
     CHAMPION_ALIAS,
+    INFERENCE_BUCKET,
     MODEL_NAME,
     bundle_uri,
     drift_report_prefix,
@@ -56,10 +57,9 @@ from cxr_core.registry import (
 )
 from cxr_flows import db, drift, labeling
 from cxr_flows.config import MonitorConfig, load_labeling_config, load_monitor_config
-from cxr_flows.labelstudio import LabelStudio, LabelStudioError, s3_settings
+from cxr_flows.labelstudio import LabelStudio, LabelStudioError, ensure_review_project
 from cxr_flows.registry import alias_version
-from cxr_flows.schema import CLASSES
-from cxr_flows.settings import INFERENCE_BUCKET, app_database_url, require_mlflow_tracking_uri
+from cxr_flows.settings import app_database_url, require_mlflow_tracking_uri
 
 PUSH_JOB = "cxr_monitor"
 
@@ -204,7 +204,6 @@ def monitor_version(
 def send_to_labeling(
     client: MlflowClient,
     url: str,
-    config: str,
     reports: list[VersionReport],
     windows: pd.DataFrame,
     feedback: pd.DataFrame,
@@ -217,7 +216,7 @@ def send_to_labeling(
     ls = LabelStudio.from_env()
     if ls is None:
         return 0
-    cfg = load_labeling_config(config)
+    cfg = load_labeling_config()
     new_windows = [
         labeling.NewWindow(
             windows[windows["model_version"] == r.model_version].reset_index(drop=True),
@@ -232,7 +231,7 @@ def send_to_labeling(
         cases = labeling.select_cases(feedback, new_windows, db.known_task_hashes(url, hashes), cfg)
         if not cases:
             return 0
-        project = ls.ensure_project(cfg.project_title, CLASSES, s3_settings(), INFERENCE_BUCKET)
+        project = ensure_review_project(ls, cfg.project_title)
         existing = {str(t["data"].get("sha256")): t for t in ls.list_tasks(project)}
         new = [c for c in cases if c.sha256 not in existing]
         ids = ls.import_tasks(project, [task_data(c) for c in new]) if new else []
@@ -252,14 +251,13 @@ def send_to_labeling(
 
 def task_data(case: labeling.Case) -> dict[str, Any]:
     """The display PNG the worker wrote, since a browser can't draw a raw DICOM. `sha256` is how a
-    later pass recognizes the task; the rest helps a reviewer's filters in the data manager."""
+    later pass recognizes the task. Why a case was picked stays in `labeling_tasks`: a reviewer who
+    can see "disagreement" in the data manager anchors on it (ADR 0009)."""
     return {
         "data": {
             "image": f"s3://{INFERENCE_BUCKET}/{case.image_key}",
             "sha256": case.sha256,
             "job_id": case.job_id,
-            "reason": case.reason,
-            "model_version": case.model_version,
         }
     }
 
@@ -348,7 +346,7 @@ def _version_key(version: str) -> tuple[int, int, str]:
 
 
 @flow(name="monitor", log_prints=True)
-def monitor_flow(config: str = "monitor", labeling_config: str = "labeling") -> list[VersionReport]:
+def monitor_flow(config: str = "monitor") -> list[VersionReport]:
     started = time.monotonic()
     cfg = load_monitor_config(config)
     url = app_database_url()
@@ -383,7 +381,7 @@ def monitor_flow(config: str = "monitor", labeling_config: str = "labeling") -> 
     for r in reports:
         _log_report(r)
     try:
-        send_to_labeling(client, url, labeling_config, reports, windows, feedback)
+        send_to_labeling(client, url, reports, windows, feedback)
     except (LabelStudioError, httpx.HTTPError) as exc:
         logger.error("cases not sent to Label Studio; later passes select again: %s", exc)
     push_metrics(build_metrics(reports, cfg, champion, time.time(), time.monotonic() - started))

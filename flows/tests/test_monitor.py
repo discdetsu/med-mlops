@@ -225,7 +225,7 @@ def labeling_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 def _send(state: dict[str, Any]) -> int:
     return monitor.send_to_labeling.fn(
-        None, "db", "labeling", state["reports"], state["windows"], state["feedback"]
+        None, "db", state["reports"], state["windows"], state["feedback"]
     )
 
 
@@ -239,7 +239,8 @@ def test_cases_go_to_label_studio_with_the_display_image_and_are_recorded(
     assert sent == len(ls.tasks) == len(labeling_env["rows"]) > 2
     first = ls.tasks[0]["data"]
     assert first["image"] == "s3://inference/results/dis/image.png"
-    assert first["reason"] == "disagreement" and first["sha256"] == "dis"
+    assert first["sha256"] == "dis"
+    assert "reason" not in first and "model_version" not in first  # a reviewer would anchor on them
     assert labeling_env["rows"][0] == ("dis", "dis-job", "cxr-classifier", "2", "disagreement", 100)
 
 
@@ -284,4 +285,4 @@ def test_a_reused_window_adds_no_drift_or_random_cases(
     monkeypatch.setattr(monitor.LabelStudio, "from_env", lambda: ls)
     labeling_env["reports"][0].reused = True
     assert _send(labeling_env) == 1
-    assert ls.tasks[0]["data"]["reason"] == "disagreement"
+    assert [row[4] for row in labeling_env["rows"]] == ["disagreement"]

@@ -120,6 +120,10 @@ def test_admin_lists_tasks_and_decisions_read_only(
     assert staff.get("/admin/labeling/labelingtask/add/").status_code == 403
     pk = LabelingTask.objects.get().pk
     assert staff.post(f"/admin/labeling/labelingtask/{pk}/change/", {}).status_code == 403
+    assert staff.post(f"/admin/labeling/labelingtask/{pk}/delete/", {}).status_code == 403
+    decision = RetrainDecision.objects.get().pk
+    assert staff.post(f"/admin/labeling/retraindecision/{decision}/delete/", {}).status_code == 403
+    assert LabelingTask.objects.count() == RetrainDecision.objects.count() == 1
 
 
 def test_auto_promote_needs_the_internal_token(client: Client) -> None:

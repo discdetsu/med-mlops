@@ -5,9 +5,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from cxr_flows.versioning import dvc_file
+
 # Model name, aliases, and bucket names live in cxr_core.registry, shared with serving.
 TRAIN_EXPERIMENT = "cxr-train"
-INFERENCE_BUCKET = "inference"
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class Paths:
 
     @property
     def has_curated(self) -> bool:
-        return self.curated.with_name(self.curated.name + ".dvc").exists()
+        return dvc_file(self.curated).exists()
 
     @property
     def golden(self) -> Path:

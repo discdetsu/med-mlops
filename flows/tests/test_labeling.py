@@ -191,6 +191,19 @@ def test_a_cap_smaller_than_the_quotas_still_holds(cfg: LabelingConfig) -> None:
     assert len(labeling.select_cases(_feedback([]), [window], set(), capped)) == 1
 
 
+def test_the_random_sample_survives_when_drift_alone_exceeds_the_cap(cfg: LabelingConfig) -> None:
+    """Enough drifted windows can fill the cap with no disagreement at all."""
+    capped = cfg.model_copy(update={"max_tasks_per_pass": 6, "top_k_drift": 3})
+    embeddings = [[9.0, 9.0], [8.0, 8.0], [7.0, 7.0], [0.0, 0.0], [0.1, 0.1]]
+    windows = [labeling.NewWindow(_window(embeddings, prefix=p), True, _reference()) for p in "abc"]
+    cases = labeling.select_cases(_feedback([]), windows, set(), capped)
+
+    assert [c.reason for c in cases] == [REASON_DRIFT] * 3 + [REASON_RANDOM] * 3
+    # Each window keeps its farthest case, rather than the first window keeping all of its own.
+    assert [c.sha256 for c in cases[:3]] == ["a0", "b0", "c0"]
+    assert {c.sha256[0] for c in cases[3:]} == {"a", "b", "c"}
+
+
 # ------------------------------------------------------------------ answers
 
 

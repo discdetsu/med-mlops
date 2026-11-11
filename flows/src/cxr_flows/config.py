@@ -118,6 +118,7 @@ class LabelingConfig(BaseModel):
     export_interval_seconds: int = Field(ge=10)
     min_new_labels: int = Field(ge=1)
     train_config: str = Field(min_length=1)
+    retrain_timeout_hours: float = Field(gt=0)
 
 
 def load_config(profile_or_path: str) -> TrainConfig:

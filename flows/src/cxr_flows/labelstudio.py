@@ -17,6 +17,9 @@ from xml.sax.saxutils import quoteattr
 
 import httpx
 
+from cxr_core.registry import INFERENCE_BUCKET
+from cxr_flows.schema import CLASSES
+
 FROM_NAME = "findings"
 TO_NAME = "image"
 # Required, so an empty answer always means the reviewer never answered, not "nothing found".
@@ -165,3 +168,8 @@ class LabelStudio:
             f"/api/tasks/{task_id}/annotations",
             json={"result": choices_result(choices), "was_cancelled": False},
         )
+
+
+def ensure_review_project(ls: LabelStudio, title: str) -> int:
+    """The labeling loop's project: the canonical classes over the `inference` bucket."""
+    return ls.ensure_project(title, CLASSES, s3_settings(), INFERENCE_BUCKET)

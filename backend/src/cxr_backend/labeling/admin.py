@@ -13,6 +13,9 @@ class _ReadOnlyAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     def has_change_permission(self, request: HttpRequest, obj: object = None) -> bool:
         return False
 
+    def has_delete_permission(self, request: HttpRequest, obj: object = None) -> bool:
+        return False
+
 
 @admin.register(LabelingTask)
 class LabelingTaskAdmin(_ReadOnlyAdmin):

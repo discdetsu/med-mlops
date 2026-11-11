@@ -1,7 +1,11 @@
 """The export flow's data handling, with Label Studio, S3, DVC, and the database faked."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import numpy as np
 import pandas as pd
@@ -9,9 +13,12 @@ import pandera.errors
 import pytest
 from botocore.exceptions import ClientError
 from PIL import Image
+from prefect.exceptions import ObjectNotFound
+from prefect.states import Completed, Crashed, Failed, Running, Scheduled
 
 from cxr_core.registry import TASK_EXPORTED, TASK_OPEN, TASK_QUARANTINED
 from cxr_flows import db, label_export, labeling
+from cxr_flows.config import load_labeling_config
 from cxr_flows.labelstudio import NONE_CHOICE, choices_result
 from cxr_flows.nih import patient_split
 from cxr_flows.schema import (
@@ -82,16 +89,20 @@ class FakeLs:
 
 class FakeS3:
     def __init__(
-        self, missing: set[str] = frozenset(), sizes: dict[str, tuple[int, int]] | None = None
-    ) -> None:  # type: ignore[assignment]
+        self,
+        missing: set[str] = frozenset(),  # type: ignore[assignment]
+        sizes: dict[str, tuple[int, int]] | None = None,
+        error_code: str = "NoSuchKey",
+    ) -> None:
         self.missing = missing
         self.sizes = sizes or {}
+        self.error_code = error_code
         self.downloads: list[str] = []
 
     def download_file(self, bucket: str, key: str, dest: str) -> None:
         self.downloads.append(key)
         if key in self.missing:
-            raise ClientError({"Error": {"Code": "NoSuchKey"}}, "GetObject")
+            raise ClientError({"Error": {"Code": self.error_code}}, "GetObject")
         _png(Path(dest), self.sizes.get(key, (256, 256)))
 
 
@@ -330,6 +341,36 @@ def test_rerun_after_a_crash_gives_the_same_rev(harness: Harness) -> None:
     assert len(read_metadata(harness.paths.curated)) == 2
 
 
+@pytest.mark.parametrize("code", ["AccessDenied", "SlowDown", "500", "503"])
+def test_an_s3_failure_leaves_the_task_open(harness: Harness, code: str) -> None:
+    """Only a missing object is permanent. Anything else is retried by the next pass."""
+    harness.tasks = [_task(1, "a")]
+    harness.s3 = FakeS3(missing={harness.tasks[0].raw_key}, error_code=code)
+    with pytest.raises(ClientError):
+        harness.run({1: ["Mass"]})
+    assert harness.quarantined == [] and harness.versions == []
+
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+def test_every_answer_for_a_missing_object_is_quarantined(harness: Harness, code: str) -> None:
+    harness.tasks = [_task(1, "a")]
+    harness.s3 = FakeS3(missing={harness.tasks[0].raw_key}, error_code=code)
+    assert harness.run({1: ["Mass"]}).quarantined == 1
+
+
+def test_a_row_already_in_curated_is_not_quarantined_when_its_upload_expires(
+    harness: Harness,
+) -> None:
+    """The process died after `dvc add`, so the task is open, then the raw upload expired."""
+    harness.tasks = [_task(1, "a")]
+    first = harness.run({1: ["Mass"]})
+    harness.s3 = FakeS3(missing={harness.tasks[0].raw_key})
+    second = harness.run({1: ["Mass"]})
+    assert harness.quarantined == []
+    assert second.exported == 1 and second.dataset_rev == first.dataset_rev
+    assert len(read_metadata(harness.paths.curated)) == 1
+
+
 def test_a_write_interrupted_before_dvc_add_is_restored_first(harness: Harness) -> None:
     harness.tasks = [_task(1, "a")]
     harness.run({1: ["Mass"]})
@@ -415,6 +456,130 @@ def test_a_scheduled_pass_with_no_change_adds_no_decision_row(
     )
     label_export._record_decision("db", moved, True, "", None)
     assert len(rows) == 2
+
+
+def test_a_retrain_is_keyed_by_its_rev_so_prefect_starts_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def run_deployment(name: str, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return type("Run", (), {"id": "run-1"})
+
+    monkeypatch.setattr(label_export, "run_deployment", run_deployment)
+    assert label_export.start_retrain(load_labeling_config(), "rev1", True) == "run-1"
+    label_export.start_retrain(load_labeling_config(), "rev2", True)
+    assert [c["idempotency_key"] for c in calls] == ["retrain-rev1", "retrain-rev2"]
+    assert calls[0]["parameters"]["request_promotion"] is True
+
+
+RUN_ID = "11111111-1111-1111-1111-111111111111"
+
+
+class FakePrefect:
+    def __init__(self, run: Any = None) -> None:
+        self.run = run
+
+    def __enter__(self) -> FakePrefect:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read_flow_run(self, run_id: UUID) -> Any:
+        if self.run is None:
+            raise ObjectNotFound(None)
+        return self.run
+
+
+def _flow_run(state: Any, age_hours: float = 1) -> Any:
+    return type(
+        "Run", (), {"state": state, "created": datetime.now(UTC) - timedelta(hours=age_hours)}
+    )
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        (_flow_run(Scheduled()), True),
+        (_flow_run(Running()), True),
+        (_flow_run(Completed()), False),
+        (_flow_run(Failed()), False),
+        (_flow_run(Crashed()), False),
+        (_flow_run(Running(), age_hours=13), False),  # a killed worker leaves it Running for good
+        (None, False),  # deleted from Prefect
+    ],
+)
+def test_retrain_running_follows_the_run_state(
+    monkeypatch: pytest.MonkeyPatch, run: Any, expected: bool
+) -> None:
+    monkeypatch.setattr(label_export.db, "last_train_run_id", lambda url: RUN_ID)
+    monkeypatch.setattr(label_export, "get_client", lambda sync_client: FakePrefect(run))
+    assert label_export.retrain_running("db", 12) is expected
+
+
+@pytest.mark.parametrize("run_id", [None, ""])
+def test_no_started_retrain_is_not_running(
+    monkeypatch: pytest.MonkeyPatch, run_id: str | None
+) -> None:
+    monkeypatch.setattr(label_export.db, "last_train_run_id", lambda url: run_id)
+    assert label_export.retrain_running("db", 12) is False
+
+
+@pytest.fixture
+def flow_env(repo: Paths, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """`label_export_flow` with everything around its branching faked."""
+    state: dict[str, Any] = {"locks": 0, "exports": 0, "running": False, "metrics": None}
+
+    @contextmanager
+    def lock(url: str) -> Iterator[None]:
+        state["locks"] += 1
+        yield
+
+    def export(*args: Any) -> label_export.ExportResult:
+        state["exports"] += 1
+        return label_export.ExportResult(None, 0, 0, None)
+
+    monkeypatch.setattr(label_export.db, "labeling_lock", lock)
+    monkeypatch.setattr(label_export.db, "task_counts", lambda url: {})
+    monkeypatch.setattr(label_export, "export_answers", export)
+    monkeypatch.setattr(label_export, "ensure_review_project", lambda ls, title: 1)
+    monkeypatch.setattr(label_export, "retrain_running", lambda url, h: state["running"])
+    monkeypatch.setattr(label_export.LabelStudio, "from_env", lambda: object())
+    monkeypatch.setattr(label_export.Paths, "discover", lambda: repo)
+    monkeypatch.setattr(label_export, "app_database_url", lambda: "db")
+    monkeypatch.setattr(label_export, "push_metrics", lambda reg: state.update(metrics=reg))
+    return state
+
+
+def test_an_export_waits_for_an_unfinished_retrain(flow_env: dict[str, Any]) -> None:
+    flow_env["running"] = True
+    result = label_export.label_export_flow.fn()
+    assert flow_env["exports"] == 0 and flow_env["locks"] == 1
+    assert result.decision is None and result.train_flow_run_id == ""
+    assert flow_env["metrics"] is not None  # Grafana still hears from a pass that waited
+
+
+def test_an_export_runs_when_no_retrain_is_unfinished(flow_env: dict[str, Any]) -> None:
+    label_export.label_export_flow.fn()
+    assert flow_env["exports"] == 1 and flow_env["locks"] == 1
+
+
+def test_a_caller_holding_the_lock_is_not_blocked_by_it(flow_env: dict[str, Any]) -> None:
+    """`make demo` holds it across labeling and the export; taking it again would deadlock."""
+    label_export.label_export_flow.fn(lock_held=True)
+    assert flow_env["exports"] == 1 and flow_env["locks"] == 0
+
+
+def test_no_rev_yet_is_logged_as_a_no(repo: Paths, caplog: pytest.LogCaptureFixture) -> None:
+    exported = label_export.ExportResult(None, 0, 1, None)
+    with caplog.at_level("INFO", logger="cxr_flows.label_export"):
+        result = label_export._decide_and_start(
+            repo, "db", load_labeling_config(), exported, True, False, None
+        )
+    assert result is exported
+    assert "should_retrain: no" in caplog.text
 
 
 def test_metrics_report_tasks_images_and_progress() -> None:

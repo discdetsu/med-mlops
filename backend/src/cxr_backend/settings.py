@@ -7,6 +7,8 @@ from urllib.parse import unquote, urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 
+from cxr_core.registry import INFERENCE_BUCKET as SHARED_INFERENCE_BUCKET
+
 
 def _require(name: str) -> str:
     try:
@@ -112,7 +114,7 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 INTERNAL_API_TOKEN = _require("INTERNAL_API_TOKEN")
 
 CELERY_BROKER_URL = _require("CELERY_BROKER_URL")
-INFERENCE_BUCKET = "inference"
+INFERENCE_BUCKET = SHARED_INFERENCE_BUCKET
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 
 LOGGING = {

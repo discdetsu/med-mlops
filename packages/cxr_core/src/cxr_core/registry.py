@@ -10,6 +10,7 @@ CHALLENGER_ALIAS = "challenger"
 # The champion before the last promotion; rollback moves @champion back to it.
 PREVIOUS_ALIAS = "previous"
 ARTIFACTS_BUCKET = "artifacts"
+INFERENCE_BUCKET = "inference"
 
 # Promotion candidates (ADR 0007): Django owns the table and its migrations; the gate flow
 # inserts one row per gated version with one of the first two statuses, and the admin's

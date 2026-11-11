@@ -24,7 +24,7 @@ Files from a folder you pass are copied, never hard-linked, because DVC makes it
 
 One row per image, the same columns in every `metadata.csv`. In Postgres they are split across `images`, `labels`, and `dataset_images` (which version holds which image, and its `file`):
 
-`image_id`, `file` (relative to the dataset directory), `patient_id`, `patient_sex` (M/F), `patient_age` (empty if NIH's value is impossible), `view_position` (PA/AP), `follow_up`, `width`, `height` (measured from the file), `split` (train/val/test_locked), `label_source` (nih_nlp/reviewer), then one 0/1 column per class: `Atelectasis`, `Cardiomegaly`, `Effusion`, `Mass`, `Pneumothorax`.
+`image_id`, `file` (relative to the dataset directory), `patient_id`, `patient_sex` (M/F), `patient_age` (empty if NIH's value is impossible), `view_position` (PA/AP), `follow_up`, `width`, `height` (measured from the file), `split` (train/val/test_locked, or train/recent in `curated/`), `label_source` (nih_nlp/reviewer), then one 0/1 column per class: `Atelectasis`, `Cardiomegaly`, `Effusion`, `Mass`, `Pneumothorax`.
 
 ## Rules
 
@@ -32,7 +32,7 @@ One row per image, the same columns in every `metadata.csv`. In Postgres they ar
 - No patient may appear in both `nih/` and `test_locked/`, or in `curated/` and `test_locked/`.
 - A curated label follows its patient's hash bucket: `test_locked` is refused, `val` goes to `recent`, and `train` goes to `recent` (20%, by a second hash) or `train`. `recent` is evaluated and never trained on, and its patients' NIH images leave training too.
 - A label that fails a check is quarantined on its `labeling_tasks` row (Django admin → Labeling), with the reason, and never reaches this directory or the `labels` table.
-- Pandera checks the schema, the files and their sizes, and the first rule; `check_no_shared_patients` checks the second. Both run in `ingest`, again in `train`, and in CI on synthetic data.
+- Pandera checks the schema, the files and their sizes, and the first rule; `check_no_shared_patients` checks the second. For `nih/` and `test_locked/`, both run in `ingest`, again in `train`, and in CI on synthetic data. For `curated/`, the export checks each new label before writing it, and `train` checks the whole directory on every run.
 
 `data/curated.dvc` joins `dataset_rev` from the first export, so the data from before that keeps its rev. Commit it after an export: `git add data/curated.dvc && git commit`.
 

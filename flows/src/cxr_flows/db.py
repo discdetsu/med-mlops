@@ -34,6 +34,8 @@ from cxr_core.registry import (
     RETRAIN_DECISIONS_TABLE,
     STATUS_GATE_FAILED,
     STATUS_PENDING,
+    TASK_EXPORTED,
+    TASK_QUARANTINED,
 )
 from cxr_flows.schema import CLASSES
 
@@ -384,7 +386,7 @@ def mark_exported(
     """(ls_task_id, labels, image_id) rows that are now in `dataset_rev`."""
     sql = f"""
         UPDATE {LABELING_TASKS_TABLE}
-        SET status = 'exported', labels = %s, image_id = %s, dataset_rev = %s,
+        SET status = '{TASK_EXPORTED}', labels = %s, image_id = %s, dataset_rev = %s,
             quarantine_reason = '', updated_at = now()
         WHERE ls_task_id = %s
     """
@@ -398,7 +400,7 @@ def mark_quarantined(url: str, rows: Iterable[tuple[int, Mapping[str, int], str]
     """(ls_task_id, labels, reason) rows: the answer is kept here and goes no further."""
     sql = f"""
         UPDATE {LABELING_TASKS_TABLE}
-        SET status = 'quarantined', labels = %s, quarantine_reason = %s, updated_at = now()
+        SET status = '{TASK_QUARANTINED}', labels = %s, quarantine_reason = %s, updated_at = now()
         WHERE ls_task_id = %s
     """
     with psycopg.connect(url) as conn, conn.cursor() as cur:
@@ -449,6 +451,16 @@ def last_triggered_rev(url: str) -> str | None:
     """
     rows = _query(url, sql, (), ("dataset_rev",))
     return None if rows.empty else str(rows.iloc[0]["dataset_rev"])
+
+
+def last_train_run_id(url: str) -> str | None:
+    """The Prefect flow run of the newest retrain that was started."""
+    sql = f"""
+        SELECT train_flow_run_id FROM {RETRAIN_DECISIONS_TABLE} WHERE triggered
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    """
+    rows = _query(url, sql, (), ("train_flow_run_id",))
+    return None if rows.empty else str(rows.iloc[0]["train_flow_run_id"])
 
 
 def record_retrain_decision(

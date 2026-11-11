@@ -217,15 +217,15 @@ def train_flow(
     dataset_rev: str | None = None,
     register_model: bool = True,
     gate: bool = True,
-    promote: bool = False,
+    request_promotion: bool = False,
     auto_promote: bool | None = None,
 ) -> str | None:
     """Returns the registered model version, or None with `register_model=False`.
 
     With `gate`, the new version is then gated against `@champion` and recorded as a
     candidate for approval in Django admin. `auto_promote` overrides gate.yaml's flag for this
-    run. `promote` asks the backend to approve the version if the gate marked it, which is what
-    `make train` does afterwards with `promote --auto`.
+    run. `request_promotion` asks the backend to approve the version if the gate marked it, which
+    is what `make train` does afterwards with `promote --auto`.
     """
     require_mlflow_tracking_uri()
     cfg = load_config(config)
@@ -327,7 +327,7 @@ def train_flow(
     logger.info("registered %s version %s as @challenger", MODEL_NAME, version)
     if gate:
         outcome = gate_flow(version=version, auto_promote=auto_promote)
-        if promote and outcome is not None and outcome.passed:
+        if request_promotion and outcome is not None and outcome.passed:
             logger.info("auto-promote: %s", request_auto_promote(version))
     return version
 

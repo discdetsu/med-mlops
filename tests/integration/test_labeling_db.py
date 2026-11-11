@@ -134,6 +134,7 @@ def test_retrain_decisions_fit_their_table() -> None:
             triggered=True, reason="yes", train_flow_run_id="t", prefect_flow_run_id="run",
         )  # fmt: skip
         assert db.last_triggered_rev(url) == rev
+        assert db.last_train_run_id(url) == "t"
     finally:
         with psycopg.connect(url) as conn:
             conn.execute("DELETE FROM retrain_decisions WHERE dataset_rev = %s", (rev,))

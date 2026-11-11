@@ -11,7 +11,11 @@ Runs every `export_interval_seconds` under the `flows-worker` service, or once w
 Every answer is checked with Pandera before it can enter the data. A row that fails, such as a
 patient in test_locked, is quarantined on its `labeling_tasks` row and never reaches `labels`,
 `images`, or `data/curated/`; the others carry on. A label that a reviewer later changes updates
-its row and makes a new rev; a rev with only such changes doesn't count towards a retrain.
+its row and makes a new rev, but isn't a new label: `should_retrain()` still counts only images
+the newest model version didn't have.
+
+While a retrain this flow started is unfinished, an export writes nothing and decides nothing, so
+it can't change the data under the run or queue a second one.
 """
 
 import argparse
@@ -19,23 +23,33 @@ import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import boto3
 import pandas as pd
 from botocore.exceptions import ClientError
 from mlflow import MlflowClient
-from prefect import flow, runtime, task
+from prefect import flow, get_client, runtime, task
 from prefect.cache_policies import NO_CACHE
 from prefect.deployments import run_deployment
+from prefect.exceptions import ObjectNotFound
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 
-from cxr_core.registry import MODEL_NAME, TASK_EXPORTED, TASK_OPEN, TASK_QUARANTINED
+from cxr_core.registry import (
+    INFERENCE_BUCKET,
+    MODEL_NAME,
+    TASK_EXPORTED,
+    TASK_OPEN,
+    TASK_QUARANTINED,
+)
 from cxr_flows import db, labeling
 from cxr_flows.config import LabelingConfig, load_labeling_config
-from cxr_flows.labelstudio import LabelStudio, s3_settings
+from cxr_flows.labelstudio import LabelStudio, ensure_review_project
 from cxr_flows.registry import newest_version
 from cxr_flows.schema import (
     CLASSES,
@@ -47,12 +61,7 @@ from cxr_flows.schema import (
     read_metadata,
     write_metadata,
 )
-from cxr_flows.settings import (
-    INFERENCE_BUCKET,
-    Paths,
-    app_database_url,
-    require_mlflow_tracking_uri,
-)
+from cxr_flows.settings import Paths, app_database_url, require_mlflow_tracking_uri
 from cxr_flows.versioning import dataset_rev as rev_of
 from cxr_flows.versioning import (
     dvc_add,
@@ -66,6 +75,8 @@ from cxr_flows.versioning import (
 
 PUSH_JOB = "cxr_labeling"
 _EXTENSIONS = {"png": ".png", "jpeg": ".jpg", "dicom": ".dcm"}
+# What S3 answers for an object that isn't there: boto's download does a HEAD first, hence "404".
+_NO_SUCH_OBJECT = {"404", "NoSuchKey", "NotFound"}
 # Named explicitly: run with `python -m` this module is `__main__`.
 logger = logging.getLogger("cxr_flows.label_export")
 
@@ -144,6 +155,11 @@ def _restore_curated(paths: Paths) -> None:
     ensure_pinned(paths.root, [paths.curated])
 
 
+def _current_rev(paths: Paths) -> str | None:
+    """The rev as pinned now; None until the first label is exported."""
+    return rev_of(pinned_md5s(paths.root, paths.versioned)) if paths.has_curated else None
+
+
 @task(cache_policy=NO_CACHE)
 def export_answers(
     paths: Paths, url: str, ls: LabelStudio, project: int, push: bool
@@ -166,8 +182,7 @@ def export_answers(
         and answers[t.ls_task_id] != t.labels
     ]
     if not fresh and not changed:
-        rev = rev_of(pinned_md5s(paths.root, paths.versioned)) if paths.has_curated else None
-        return ExportResult(rev, 0, 0, None)
+        return ExportResult(_current_rev(paths), 0, 0, None)
 
     ensure_pinned(paths.root, [paths.test_locked])
     locked = read_metadata(paths.test_locked)
@@ -185,10 +200,16 @@ def export_answers(
         try:
             s3.download_file(INFERENCE_BUCKET, t.raw_key, str(target))
         except ClientError as exc:
-            # Expired by the bucket's lifecycle rule, most likely: no file, nothing to train on.
-            why = f"raw upload unavailable: {exc.response.get('Error', {}).get('Code')}"
-            gone.append((t.ls_task_id, answers[t.ls_task_id], why))
-            continue
+            code = exc.response.get("Error", {}).get("Code")
+            if code not in _NO_SUCH_OBJECT:
+                raise  # an outage or a permission problem: nothing is written, tasks stay open
+            already_exported = paths.curated / target.relative_to(staging)
+            if not already_exported.exists():
+                # Expired by the bucket's lifecycle rule: no file, nothing to train on.
+                gone.append((t.ls_task_id, answers[t.ls_task_id], f"raw upload missing: {code}"))
+                continue
+            # An earlier export died after `dvc add`, so the row is in the data and needs its file.
+            shutil.copyfile(already_exported, target)
         rows.append(curated_row(t, answers[t.ls_task_id], staging))
         by_image[image_id] = t
 
@@ -205,8 +226,7 @@ def export_answers(
         db.mark_quarantined(url, quarantine)
     updates = {labeling.image_id_for(t.sha256): answers[t.ls_task_id] for t in changed}
     if accepted.empty and not updates:
-        rev = rev_of(pinned_md5s(paths.root, paths.versioned)) if paths.has_curated else None
-        return ExportResult(rev, 0, len(quarantine), None)
+        return ExportResult(_current_rev(paths), 0, len(quarantine), None)
 
     existing = read_metadata(paths.curated) if paths.has_curated else None
     curated = apply_labels(existing, accepted, updates)
@@ -268,19 +288,42 @@ def decide_retrain(
 
 def start_retrain(cfg: LabelingConfig, rev: str, auto_promote: bool) -> str:
     """Queue the train deployment and return its flow run ID. `dataset_rev` pins the run: it fails
-    rather than train on other data if the workspace has moved on by the time it starts."""
+    rather than train on other data if the workspace has moved on by the time it starts.
+
+    The idempotency key makes a rev's run unique in Prefect itself. If this process dies, or the
+    decision can't be recorded, after Prefect created the run, the next pass gets that same run
+    back and records it instead of starting another.
+    """
     run = run_deployment(
         labeling.TRAIN_DEPLOYMENT,
         parameters={
             "config": cfg.train_config,
             "dataset_rev": rev,
-            "promote": True,
+            "request_promotion": True,
             "auto_promote": auto_promote,
         },
         timeout=0,
         as_subflow=False,
+        idempotency_key=f"retrain-{rev}",
     )
     return str(run.id)  # type: ignore[union-attr]  # sync here: not awaited inside async code
+
+
+def retrain_running(url: str, timeout_hours: float) -> bool:
+    """Whether the newest retrain this flow started is still queued or running. One unfinished
+    after `timeout_hours` is presumed dead: a killed worker leaves its run `Running` for good, and
+    that mustn't stop exports forever."""
+    run_id = db.last_train_run_id(url)
+    if not run_id:
+        return False
+    with get_client(sync_client=True) as client:
+        try:
+            run = client.read_flow_run(UUID(run_id))
+        except ObjectNotFound:
+            return False
+    if run.state is None or run.state.is_final() or run.created is None:
+        return False
+    return datetime.now(UTC) - run.created < timedelta(hours=timeout_hours)
 
 
 def build_metrics(
@@ -308,7 +351,10 @@ def label_export_flow(
     trigger: bool = True,
     auto_promote: bool = False,
     min_new_labels: int | None = None,
+    lock_held: bool = False,
 ) -> ExportResult:
+    """`lock_held` means the caller already holds `db.labeling_lock`, as `make demo` does so that a
+    scheduled export can't take its answers half-finished."""
     cfg = load_labeling_config(config)
     paths = Paths.discover()
     url = app_database_url()
@@ -316,34 +362,52 @@ def label_export_flow(
     if ls is None:
         raise RuntimeError("LABEL_STUDIO_URL is not set; Label Studio is in the `full` profile")
 
-    with db.labeling_lock(url):
-        project = ls.ensure_project(cfg.project_title, CLASSES, s3_settings(), INFERENCE_BUCKET)
-        result = export_answers(paths, url, ls, project, push)
-        decision, train_run = None, ""
-        if result.dataset_rev is not None:
-            decision = decide_retrain(
-                paths, url, result.dataset_rev, min_new_labels or cfg.min_new_labels
+    lock: AbstractContextManager[None] = nullcontext() if lock_held else db.labeling_lock(url)
+    with lock:
+        if retrain_running(url, cfg.retrain_timeout_hours):
+            logger.info("should_retrain: no: the last retrain hasn't finished, so nothing exported")
+            result = ExportResult(_current_rev(paths), 0, 0, None)
+        else:
+            project = ensure_review_project(ls, cfg.project_title)
+            exported = export_answers(paths, url, ls, project, push)
+            result = _decide_and_start(
+                paths, url, cfg, exported, trigger, auto_promote, min_new_labels
             )
-            logger.info(
-                "should_retrain: %s: %s", "yes" if decision.trigger else "no", decision.reason
-            )
-            failure = None
-            if decision.trigger and trigger:
-                try:
-                    train_run = start_retrain(cfg, result.dataset_rev, auto_promote)
-                except Exception as exc:
-                    failure = exc
-            _record_decision(url, decision, trigger, train_run, failure)
-            if failure is not None:
-                raise RetrainNotStarted(
-                    f"couldn't start {labeling.TRAIN_DEPLOYMENT}: {failure}"
-                ) from failure
 
     curated = read_metadata(paths.curated) if paths.has_curated else None
-    push_metrics(build_metrics(db.task_counts(url), curated, decision))
-    return ExportResult(
-        result.dataset_rev, result.exported, result.quarantined, decision, train_run
+    push_metrics(build_metrics(db.task_counts(url), curated, result.decision))
+    return result
+
+
+def _decide_and_start(
+    paths: Paths,
+    url: str,
+    cfg: LabelingConfig,
+    exported: ExportResult,
+    trigger: bool,
+    auto_promote: bool,
+    min_new_labels: int | None,
+) -> ExportResult:
+    """`exported` with the retrain decision, after starting the retrain if it says yes."""
+    if exported.dataset_rev is None:
+        logger.info("should_retrain: no: no label has been exported yet, so there is no new rev")
+        return exported
+    decision = decide_retrain(
+        paths, url, exported.dataset_rev, min_new_labels or cfg.min_new_labels
     )
+    logger.info("should_retrain: %s: %s", "yes" if decision.trigger else "no", decision.reason)
+    train_run, failure = "", None
+    if decision.trigger and trigger:
+        try:
+            train_run = start_retrain(cfg, exported.dataset_rev, auto_promote)
+        except Exception as exc:
+            failure = exc
+    _record_decision(url, decision, trigger, train_run, failure)
+    if failure is not None:
+        raise RetrainNotStarted(
+            f"couldn't start {labeling.TRAIN_DEPLOYMENT}: {failure}"
+        ) from failure
+    return replace(exported, decision=decision, train_flow_run_id=train_run)
 
 
 def _record_decision(
