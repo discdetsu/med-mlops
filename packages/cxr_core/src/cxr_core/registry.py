@@ -10,6 +10,7 @@ CHALLENGER_ALIAS = "challenger"
 # The champion before the last promotion; rollback moves @champion back to it.
 PREVIOUS_ALIAS = "previous"
 ARTIFACTS_BUCKET = "artifacts"
+INFERENCE_BUCKET = "inference"
 
 # Promotion candidates (ADR 0007): Django owns the table and its migrations; the gate flow
 # inserts one row per gated version with one of the first two statuses, and the admin's
@@ -25,6 +26,18 @@ STATUS_ROLLED_BACK = "rolled_back"
 # report, and the HTML reports live under this prefix in the artifacts bucket.
 DRIFT_REPORTS_TABLE = "drift_reports"
 MONITORING_PREFIX = "monitoring/"
+
+# The labeling loop (ADR 0009): Django owns both tables; the monitor flow inserts one task row per
+# case it sends to Label Studio, the export flow moves it to one of the other statuses and records
+# each retrain decision.
+LABELING_TASKS_TABLE = "labeling_tasks"
+RETRAIN_DECISIONS_TABLE = "retrain_decisions"
+TASK_OPEN = "open"
+TASK_EXPORTED = "exported"
+TASK_QUARANTINED = "quarantined"
+REASON_DISAGREEMENT = "disagreement"
+REASON_DRIFT = "drift"
+REASON_RANDOM = "random"
 
 
 def bundle_prefix(model_name: str, version: str) -> str:

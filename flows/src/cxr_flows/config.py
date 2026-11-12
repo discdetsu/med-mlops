@@ -1,5 +1,6 @@
-"""Config files in `configs/`, validated with pydantic: training profiles
-(`<profile>.yaml`), the promotion gate (`gate.yaml`), and the monitor flow (`monitor.yaml`).
+"""Config files in `configs/`, validated with pydantic: training profiles (`<profile>.yaml`),
+the promotion gate (`gate.yaml`), the monitor flow (`monitor.yaml`), and the labeling loop
+(`labeling.yaml`).
 
 A training config is frozen once loaded; its hash goes on the MLflow run so two runs with the
 same dataset_rev and config_hash are directly comparable.
@@ -105,6 +106,21 @@ class MonitorConfig(BaseModel):
         return self
 
 
+class LabelingConfig(BaseModel):
+    """Which cases reach Label Studio and when retraining starts (see configs/labeling.yaml)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_title: str = Field(min_length=1)
+    top_k_drift: int = Field(ge=0)
+    random_k: int = Field(ge=0)
+    max_tasks_per_pass: int = Field(ge=1)
+    export_interval_seconds: int = Field(ge=10)
+    min_new_labels: int = Field(ge=1)
+    train_config: str = Field(min_length=1)
+    retrain_timeout_hours: float = Field(gt=0)
+
+
 def load_config(profile_or_path: str) -> TrainConfig:
     """Load a bundled profile by name (`demo`, `full`) or any YAML file by path."""
     return TrainConfig.model_validate(_load_yaml(profile_or_path))
@@ -116,6 +132,10 @@ def load_gate_config(name_or_path: str = "gate") -> GateConfig:
 
 def load_monitor_config(name_or_path: str = "monitor") -> MonitorConfig:
     return MonitorConfig.model_validate(_load_yaml(name_or_path))
+
+
+def load_labeling_config(name_or_path: str = "labeling") -> LabelingConfig:
+    return LabelingConfig.model_validate(_load_yaml(name_or_path))
 
 
 def _load_yaml(name_or_path: str) -> object:

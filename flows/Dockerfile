@@ -1,9 +1,12 @@
-# The `monitor` service (full profile): the flows package without torch. Build context: the
-# repo root (uv workspace), like backend/ and worker/.
+# Two images from the flows package. Build context: the repo root (uv workspace), like backend/
+# and worker/.
 #
-# cxr-flows depends on cxr-core[train] for training; the monitor flow never imports torch, so
-# torch, torchvision, and timm are left out of this image (about 1.5 GB). Only flows that don't
-# train or export run here; Phase 5's train deployment needs an image with them.
+#   target monitor:  the `monitor` service. cxr-flows depends on cxr-core[train] for training; the
+#                    monitor flow never imports torch, so torch, torchvision, and timm are left out
+#                    (about 1.5 GB).
+#   target worker:   the `flows-worker` service (build arg SKIP=""): CPU torch, plus git for the
+#                    lineage tags. It runs on the repo itself, bind-mounted at /workspace, because
+#                    training and export read and write the DVC workspace.
 FROM python:3.14.9-slim AS build
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
@@ -22,7 +25,21 @@ COPY flows/src flows/src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package cxr-flows --no-editable $SKIP
 
-FROM python:3.14.9-slim
+FROM python:3.14.9-slim AS worker
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app/.venv /app/.venv
+# The container runs as the host user (HOST_UID in docker-compose.yml), so the files it writes stay
+# the host's. That user has no passwd entry: HOME and USER stand in for it, and git is told to trust
+# a repo it doesn't own when the IDs differ.
+ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 MLFLOW_DISABLE_AGENT_HINT=1 \
+    CXR_REPO_ROOT=/workspace HOME=/tmp USER=flows-worker \
+    HF_HOME=/workspace/.cache/huggingface \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=*
+WORKDIR /workspace
+CMD ["python", "-m", "cxr_flows.deployments"]
+
+FROM python:3.14.9-slim AS monitor
 # The reference cache volume mounts here; a new named volume takes this directory's owner.
 RUN useradd --system --uid 10001 --create-home app \
     && mkdir -p /home/app/.cache && chown app:app /home/app/.cache

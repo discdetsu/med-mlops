@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from cxr_flows.versioning import dvc_file
+
 # Model name, aliases, and bucket names live in cxr_core.registry, shared with serving.
 TRAIN_EXPERIMENT = "cxr-train"
 
@@ -40,9 +42,15 @@ class Paths:
         return self.data / "test_locked"
 
     @property
-    def versioned(self) -> tuple[Path, Path]:
-        """The paths a dataset_rev covers. golden is pinned too, but parity-only."""
-        return (self.nih, self.test_locked)
+    def versioned(self) -> tuple[Path, ...]:
+        """The paths a dataset_rev covers. golden is pinned too, but parity-only. curated counts
+        from its first export, so the data from before that keeps its rev."""
+        base = (self.nih, self.test_locked)
+        return (*base, self.curated) if self.has_curated else base
+
+    @property
+    def has_curated(self) -> bool:
+        return dvc_file(self.curated).exists()
 
     @property
     def golden(self) -> Path:
@@ -51,7 +59,7 @@ class Paths:
 
     @property
     def curated(self) -> Path:
-        """Reviewer labels from Label Studio (Phase 5). The only place new labels may go."""
+        """Reviewer labels from Label Studio (ADR 0009). The only place new labels may go."""
         return self.data / "curated"
 
     @property

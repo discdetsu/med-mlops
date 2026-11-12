@@ -165,3 +165,124 @@ def test_push_is_skipped_without_a_gateway(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_versions_sort_numerically() -> None:
     assert sorted(["10", "2", "1"], key=monitor._version_key) == ["1", "2", "10"]
+
+
+class FakeLabelStudio:
+    def __init__(self, existing: list[dict[str, Any]] | None = None) -> None:
+        self.tasks = list(existing or [])
+        self.imports = 0
+
+    def ensure_project(self, *args: Any) -> int:
+        return 1
+
+    def list_tasks(self, project: int) -> list[dict[str, Any]]:
+        return self.tasks
+
+    def import_tasks(self, project: int, tasks: list[dict[str, Any]]) -> list[int]:
+        self.imports += 1
+        ids = [100 + len(self.tasks) + i for i in range(len(tasks))]
+        self.tasks += [{"id": i, **t} for i, t in zip(ids, tasks, strict=True)]
+        return ids
+
+
+@pytest.fixture
+def labeling_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """A monitor pass's labeling step with a window of 10 files, one of them a disagreement."""
+    from contextlib import nullcontext
+
+    state: dict[str, Any] = {"rows": [], "known": set()}
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "k")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+    monkeypatch.setattr(monitor.db, "labeling_lock", lambda url: nullcontext())
+    monkeypatch.setattr(monitor.db, "known_task_hashes", lambda url, h: set(state["known"]))
+    monkeypatch.setattr(monitor.db, "record_tasks", lambda url, r: state["rows"].extend(r))
+    reference = _population(200, np.random.default_rng(0), ap_share=0.37)
+    monkeypatch.setattr(monitor, "load_reference", lambda client, version: reference)
+    rows = _rows(_population(10, np.random.default_rng(1), ap_share=1.0))
+    rows["patient_id"] = "00000002"  # hashes to train
+    rows["sha256"] = [f"sha{i}" for i in range(len(rows))]
+    rows["image_key"] = [f"results/{i}/image.png" for i in range(len(rows))]
+    rows["model_version"] = "2"
+    state["windows"] = rows
+    state["feedback"] = pd.DataFrame(
+        {
+            "job_id": ["dis-job"],
+            "model_version": ["2"],
+            "labels": [{"Mass": 1}],
+            "probabilities": [{"Mass": 0.1}],
+            "thresholds": [{"Mass": 0.5}],
+            "patient_id": ["00000002"],
+            "sha256": ["dis"],
+            "image_key": ["results/dis/image.png"],
+            "created_at": [pd.Timestamp("2026-11-01")],
+        }
+    )
+    state["reports"] = [
+        monitor.VersionReport("2", True, 10, scores=[{"kind": "embedding"}], drift_detected=True)
+    ]
+    return state
+
+
+def _send(state: dict[str, Any]) -> int:
+    return monitor.send_to_labeling.fn(
+        None, "db", state["reports"], state["windows"], state["feedback"]
+    )
+
+
+def test_cases_go_to_label_studio_with_the_display_image_and_are_recorded(
+    labeling_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ls = FakeLabelStudio()
+    monkeypatch.setattr(monitor.LabelStudio, "from_env", lambda: ls)
+    sent = _send(labeling_env)
+
+    assert sent == len(ls.tasks) == len(labeling_env["rows"]) > 2
+    first = ls.tasks[0]["data"]
+    assert first["image"] == "s3://inference/results/dis/image.png"
+    assert first["sha256"] == "dis"
+    assert "reason" not in first and "model_version" not in first  # a reviewer would anchor on them
+    assert labeling_env["rows"][0] == ("dis", "dis-job", "cxr-classifier", "2", "disagreement", 100)
+
+
+def test_a_case_recorded_before_is_not_sent_again(
+    labeling_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ls = FakeLabelStudio()
+    monkeypatch.setattr(monitor.LabelStudio, "from_env", lambda: ls)
+    _send(labeling_env)
+    labeling_env["known"] = {row[0] for row in labeling_env["rows"]}
+    before = len(ls.tasks)
+    labeling_env["windows"] = labeling_env["windows"].iloc[:0]
+    labeling_env["reports"] = []
+    assert _send(labeling_env) == 0
+    assert len(ls.tasks) == before
+
+
+def test_a_crash_after_creating_tasks_does_not_duplicate_them(
+    labeling_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tasks exist in Label Studio but not in the table: they are recorded, not re-created."""
+    existing = [{"id": 7, "data": {"sha256": "dis"}}]
+    ls = FakeLabelStudio(existing)
+    monkeypatch.setattr(monitor.LabelStudio, "from_env", lambda: ls)
+    _send(labeling_env)
+    assert sum(t["data"]["sha256"] == "dis" for t in ls.tasks) == 1
+    assert ("dis", "dis-job", "cxr-classifier", "2", "disagreement", 7) in labeling_env["rows"]
+
+
+def test_labeling_is_skipped_without_label_studio(
+    labeling_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LABEL_STUDIO_URL", raising=False)
+    assert _send(labeling_env) == 0
+    assert labeling_env["rows"] == []
+
+
+def test_a_reused_window_adds_no_drift_or_random_cases(
+    labeling_env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ls = FakeLabelStudio()
+    monkeypatch.setattr(monitor.LabelStudio, "from_env", lambda: ls)
+    labeling_env["reports"][0].reused = True
+    assert _send(labeling_env) == 1
+    assert [row[4] for row in labeling_env["rows"]] == ["disagreement"]

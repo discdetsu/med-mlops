@@ -3,7 +3,7 @@ from pathlib import Path
 import pydantic
 import pytest
 
-from cxr_flows.config import load_config
+from cxr_flows.config import load_config, load_labeling_config
 
 
 @pytest.mark.parametrize("profile", ["demo", "full"])
@@ -38,3 +38,14 @@ def test_unknown_profile() -> None:
 def test_hash_changes_with_config() -> None:
     cfg = load_config("demo")
     assert cfg.config_hash != cfg.model_copy(update={"epochs": cfg.epochs + 1}).config_hash
+
+
+def test_labeling_config_loads_and_rejects_unknown_keys(tmp_path: Path) -> None:
+    cfg = load_labeling_config()
+    assert cfg.min_new_labels >= 1
+    load_config(cfg.train_config)  # names a real profile
+    typo = tmp_path / "typo.yaml"
+    base = (Path(__file__).parents[1] / "src/cxr_flows/configs/labeling.yaml").read_text()
+    typo.write_text(base + "min_labels: 3\n")
+    with pytest.raises(pydantic.ValidationError):
+        load_labeling_config(str(typo))

@@ -1,6 +1,6 @@
 # 0006: Django reads the flows' tables only once a feature needs them, and app tables share one namespace
 
-- Status: Accepted; Django owns `model_candidates` per 0007
+- Status: Accepted; Django owns `model_candidates` per 0007 and `labeling_tasks` per 0009
 - Date: 2026-10-30
 
 ## Context

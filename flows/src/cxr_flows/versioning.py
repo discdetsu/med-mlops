@@ -40,6 +40,11 @@ def dvc_pull(root: Path, targets: Sequence[Path]) -> None:
     dvc(root, "pull", *(str(dvc_file(t).relative_to(root)) for t in targets))
 
 
+def dvc_restore(root: Path, target: Path) -> None:
+    """Put `target` back to what its .dvc file pins, dropping anything added since."""
+    dvc(root, "checkout", "--force", str(dvc_file(target).relative_to(root)))
+
+
 def is_clean(root: Path, target: Path) -> bool:
     """True when `target` exists and matches its .dvc file exactly."""
     if not target.exists():

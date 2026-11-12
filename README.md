@@ -4,7 +4,7 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 4, monitoring.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. Under the `full` profile, a scheduled monitor flow compares each version's recent predictions with its validation set, computes AUROC from reviewer feedback, and alerts through Prometheus to Discord or Slack. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+Status: **Phase 5, labeling loop.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. Under the `full` profile, a scheduled monitor flow compares each version's recent predictions with its validation set, computes AUROC from reviewer feedback, and alerts through Prometheus to Discord or Slack. Disagreements and drifted cases go to Label Studio, the labels come back as a new DVC revision, and enough new labels start a retrain; `make demo` plays that whole loop with no clicks. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
 
 ## Quickstart: upload → heatmap
 
@@ -34,8 +34,11 @@ make seed             # NIH subset from Kaggle → validate → DVC add + push �
 make train            # train → evaluate → ONNX → E2E parity → reference → @challenger → gate
 make gate VERSION=N   # re-run the promotion gate for a version (default: @challenger)
 make bootstrap-champion  # first model → @champion, seed bundle in dist/
-make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana, monitor
+make up PROFILE=full  # + Prefect, Label Studio, Prometheus, Alertmanager, Pushgateway, Grafana,
+                      #   monitor, flows-worker
 make monitor          # one monitor pass (PROFILE=full also pushes the scores to Prometheus)
+make label-export     # Label Studio annotations → data/curated → new DVC rev → should_retrain()
+make demo             # the whole loop on the full stack: drift → labels → retrain → gate → promote
 make test-rules       # promtool: Prometheus config check + alert rule unit tests
 make help             # all targets
 ```
@@ -68,9 +71,9 @@ Under `make up PROFILE=full`, the `monitor` service runs the monitor flow every 
 - each class probability;
 - sex, age, and view, from the upload's form fields or its DICOM header.
 
-From 30 labeled predictions it also reports AUROC against reviewer feedback, with a bootstrap CI. Scores go to Prometheus through the Pushgateway, each report to Django admin under **Monitoring → Drift reports** (with the full Evidently page), and alerts to Discord or Slack. It never retrains: Phase 5 retrains on new labels. Thresholds live in [`monitor.yaml`](flows/src/cxr_flows/configs/monitor.yaml), and [ADR 0008](docs/adr/0008-monitoring-drift-and-alerts.md) has the reasoning and the calibration.
+From 30 labeled predictions it also reports AUROC against reviewer feedback, with a bootstrap CI. Scores go to Prometheus through the Pushgateway, each report to Django admin under **Monitoring → Drift reports** (with the full Evidently page), and alerts to Discord or Slack. It never retrains: only new labels do (below). Thresholds live in [`monitor.yaml`](flows/src/cxr_flows/configs/monitor.yaml), and [ADR 0008](docs/adr/0008-monitoring-drift-and-alerts.md) has the reasoning and the calibration.
 
-Grafana (http://localhost:3000, `admin` / `GRAFANA_ADMIN_PASSWORD`) has three provisioned dashboards: **CXR · Serving** (API and workers), **CXR · Queue** (RabbitMQ, DLQ), and **CXR · Model** (per version: what serves, drift against thresholds, delayed AUROC). Alerts: API error rate, backend down, no worker, non-empty DLQ, drift above threshold, and a stale or never-run monitor. To get them in a channel, set `DISCORD_WEBHOOK_URL` or `SLACK_WEBHOOK_URL` in `.env` before `make up`; without either, they are listed at http://localhost:9093.
+Grafana (http://localhost:3000, `admin` / `GRAFANA_ADMIN_PASSWORD`) has three provisioned dashboards: **CXR · Serving** (API and workers), **CXR · Queue** (RabbitMQ, DLQ), and **CXR · Model** (per version: what serves, drift against thresholds, delayed AUROC, and the labeling loop's tasks and new labels). Alerts: API error rate, backend down, no worker, non-empty DLQ, drift above threshold, and a stale or never-run monitor. To get them in a channel, set `DISCORD_WEBHOOK_URL` or `SLACK_WEBHOOK_URL` in `.env` before `make up`; without either, they are listed at http://localhost:9093.
 
 The drift demo needs the NIH images on disk (`make seed` or `dvc pull data/nih`) and a `@champion`:
 
@@ -84,6 +87,29 @@ docker compose --profile full stop monitor  # CxrMonitorStale fires about 16 min
 ```
 
 Checked on 2026-11-01 against the `full` stack with the v2 champion. 150 validation images scored embedding 0.48 (threshold 0.6) and view 0.006 (threshold 0.2), with no drift. Their 45 labels gave a delayed macro AUROC of 0.64 (95% CI 0.51 to 0.82). Then 200 AP views scored embedding 0.76 and view 0.54, and both `CxrDriftDetected` alerts reached the webhook. With the monitor stopped, `CxrMonitorStale` fired after 16 minutes. A pass takes about 10 s on a laptop CPU.
+
+## Labeling loop: labels → new data → retrain
+
+Each monitor pass also sends cases to review in Label Studio (http://localhost:8080, `LABEL_STUDIO_USERNAME` / `LABEL_STUDIO_PASSWORD`, project **CXR review**): predictions a reviewer disagreed with in the feedback form, the 25 farthest from the reference in any window that drifted, and a small random sample. Reviewers see the image and the five findings, never the model's answer. A case needs a patient ID, sent as the `patient_id` upload field or read from the DICOM header, because that is how the locked test set stays protected; the UI's plain PNGs don't have one, so they can't enter the loop.
+
+The `flows-worker` service exports finished annotations every 15 minutes (`make label-export` runs one):
+
+- Each answer is checked with Pandera. One that fails, such as a patient in `test_locked`, an expired upload, or missing sex or view, is quarantined with its reason under **Labeling → Labeling tasks** in Django admin, and never reaches the data.
+- The rest go to `data/curated/`, which makes a new `dataset_rev` (`dvc add` + `dvc push`, `labels` with `label_source=reviewer`). Commit the pointer with `git add data/curated.dvc && git commit`.
+- A patient's labels go to `train`, or to `recent`, a slice held back from training and reported in each version's evaluation.
+- `should_retrain()` starts the `train/retrain` deployment on a new rev with at least 50 new training labels (`min_new_labels` in [`labeling.yaml`](flows/src/cxr_flows/configs/labeling.yaml)). Every decision, either way, is under **Labeling → Retrain decisions**. Drift alone never starts one.
+
+A retrain runs in `flows-worker` on the repo itself, ends with the promotion gate, and waits for approval in the admin like any other version. See [ADR 0009](docs/adr/0009-label-driven-retraining.md).
+
+`make demo` plays all of it with no clicks. It needs the `full` stack, a `@champion`, and the NIH images on disk:
+
+```sh
+make up PROFILE=full
+make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz
+make demo   # DEMO_ARGS="--n 200 --feedback 0.6"; about 40 minutes on a laptop CPU
+```
+
+It sends AP views the champion didn't train on, with NIH labels as feedback on some of them. The monitor flags the drift and selects cases, the NIH labels stand in for a reviewer through Label Studio's API, the export makes a new rev, and the retrain runs and is gated. `auto_promote` is on for that run only. If the gate passes, the demo checks that a new upload is predicted by the new version on the new rev; if not, it stops there with the gate report. It leaves `data/curated/` and a staged `data/curated.dvc` behind, and moves `@champion` in that stack's MLflow.
 
 `make up` copies `.env.example` to `.env` on first run. Change the passwords there for anything other than a local demo.
 
@@ -101,7 +127,7 @@ Checked on 2026-11-01 against the `full` stack with the v2 champion. 150 validat
 | Alertmanager | http://localhost:9093 | full |
 | Pushgateway | http://localhost:9091 | full |
 
-All ports bind to `127.0.0.1` only. Django has no published port: browsers reach it through Nginx, and its `/internal` API (for workers) and `/metrics` stay on the compose network, as do the workers' `/metrics` and the `monitor` service.
+All ports bind to `127.0.0.1` only. Django has no published port: browsers reach it through Nginx, and its `/internal` API (for workers) and `/metrics` stay on the compose network, as do the workers' `/metrics` and the `monitor` and `flows-worker` services.
 
 ## Repository layout
 
@@ -118,15 +144,17 @@ compose/               config mounted into compose services (one folder per serv
 packages/cxr_core/     shared preprocess / ONNX inference / CAM / metrics / bundle / registry names
                        (numpy only); model factory behind [train]
 backend/               Django + Ninja: jobs, feedback, registry (champion, seed_model, promotion
-                       admin), monitoring (/metrics, drift reports in admin)
+                       admin), monitoring (/metrics, drift reports in admin), labeling (tasks and
+                       retrain decisions in admin)
 worker/                Celery ONNX inference worker, no Django, no torch
 flows/                 Prefect flows: ingest, train, promotion (gate), monitor (drift + delayed
-                       AUROC); Dockerfile builds the monitor service, without torch
-  src/cxr_flows/configs/ training profiles (demo, full), gate.yaml, monitor.yaml
+                       AUROC + cases for review), label-export (labels → DVC rev → should_retrain);
+                       Dockerfile builds the monitor service, without torch, and flows-worker
+  src/cxr_flows/configs/ training profiles (demo, full), gate.yaml, monitor.yaml, labeling.yaml
 frontend/              Svelte + Vite UI, built into the nginx image
 data/                  DVC-tracked datasets; only .dvc pointers are committed
 scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wait_healthy.sh,
-                       replay_traffic.py, inject_drift.py
+                       replay_traffic.py, inject_drift.py, demo.py
 tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
 docs/model-card.md     data, classes, metrics, limitations

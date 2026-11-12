@@ -9,10 +9,13 @@ The registered version's ONNX model is logged with the MLflow ONNX flavor; the s
 import contextlib
 import dataclasses
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import boto3
+import httpx
 import mlflow
 import mlflow.onnx
 import onnx
@@ -74,6 +77,30 @@ def register(
         client.set_model_version_tag(model_name, version, key, value)
     client.set_registered_model_alias(model_name, CHALLENGER_ALIAS, version)
     return version
+
+
+def newest_version(client: MlflowClient, model_name: str) -> Any | None:
+    """The highest-numbered version of the model, whatever its aliases; None without one."""
+    versions = client.search_model_versions(f"name = '{model_name}'")
+    return max(versions, key=lambda v: int(v.version), default=None)
+
+
+def request_auto_promote(version: str) -> dict[str, Any]:
+    """`promote --auto` through the backend, for a run started from a Prefect deployment, where
+    no make target follows the flow (ADR 0007). A no-op unless the gate marked the version."""
+    try:
+        url, token = os.environ["BACKEND_URL"], os.environ["INTERNAL_API_TOKEN"]
+    except KeyError as exc:
+        raise RuntimeError(f"{exc.args[0]} is not set; the flows-worker service sets it") from None
+    response = httpx.post(
+        f"{url}/internal/auto-promote",
+        json={"version": version},
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=60,
+    )
+    response.raise_for_status()
+    result: dict[str, Any] = response.json()
+    return result
 
 
 def alias_version(client: MlflowClient, model_name: str, alias: str) -> str | None:

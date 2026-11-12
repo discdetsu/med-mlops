@@ -11,10 +11,15 @@ any gate runs; the gate flow only inserts rows (ADR 0007).
 
 Monitoring: the monitor flow reads the backend's `predictions`, `inference_jobs`, and `feedback`,
 and inserts into `drift_reports`, which Django owns for the same reason (ADR 0008).
+
+Labeling: the monitor and export flows write `labeling_tasks` and `retrain_decisions`, again owned
+by Django (ADR 0009).
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -25,8 +30,12 @@ from psycopg.types.json import Jsonb
 from cxr_core.registry import (
     CANDIDATES_TABLE,
     DRIFT_REPORTS_TABLE,
+    LABELING_TASKS_TABLE,
+    RETRAIN_DECISIONS_TABLE,
     STATUS_GATE_FAILED,
     STATUS_PENDING,
+    TASK_EXPORTED,
+    TASK_QUARANTINED,
 )
 from cxr_flows.schema import CLASSES
 
@@ -205,13 +214,13 @@ def record_candidate(
 # as embedding drift. Rows from workers older than Phase 4 have no embedding and are left out.
 _WINDOWS = """
 SELECT job_id, model_version, created_at, probabilities, embedding,
-       patient_sex, patient_age, view_position
+       patient_sex, patient_age, view_position, patient_id, sha256, image_key
 FROM (
     SELECT *, row_number() OVER (PARTITION BY model_version ORDER BY created_at DESC) AS rank
     FROM (
         SELECT DISTINCT ON (p.model_version, j.sha256)
                p.job_id, p.model_version, p.created_at, p.probabilities, p.embedding,
-               j.patient_sex, j.patient_age, j.view_position
+               j.patient_sex, j.patient_age, j.view_position, j.patient_id, j.sha256, p.image_key
         FROM predictions p JOIN inference_jobs j ON j.id = p.job_id
         WHERE p.model_name = %s AND p.created_at >= %s AND p.embedding IS NOT NULL
         ORDER BY p.model_version, j.sha256, p.created_at DESC
@@ -224,17 +233,23 @@ ORDER BY model_version, created_at
 # The latest answer per job: a reviewer may correct their own feedback.
 _FEEDBACK = """
 SELECT DISTINCT ON (f.job_id)
-       f.job_id, p.model_version, f.verdict, f.labels, p.probabilities, f.created_at
-FROM feedback f JOIN predictions p ON p.job_id = f.job_id
+       f.job_id, p.model_version, f.verdict, f.labels, p.probabilities, f.created_at,
+       p.thresholds, j.patient_id, j.sha256, p.image_key
+FROM feedback f
+JOIN predictions p ON p.job_id = f.job_id
+JOIN inference_jobs j ON j.id = f.job_id
 WHERE p.model_name = %s AND f.created_at >= %s
 ORDER BY f.job_id, f.created_at DESC, f.id DESC
 """
 
 WINDOW_COLUMNS = (
     "job_id", "model_version", "created_at", "probabilities", "embedding",
-    "patient_sex", "patient_age", "view_position",
+    "patient_sex", "patient_age", "view_position", "patient_id", "sha256", "image_key",
 )  # fmt: skip
-FEEDBACK_COLUMNS = ("job_id", "model_version", "verdict", "labels", "probabilities", "created_at")
+FEEDBACK_COLUMNS = (
+    "job_id", "model_version", "verdict", "labels", "probabilities", "created_at",
+    "thresholds", "patient_id", "sha256", "image_key",
+)  # fmt: skip
 
 
 def read_windows(url: str, model_name: str, since: datetime, limit: int) -> pd.DataFrame:
@@ -295,6 +310,184 @@ def record_drift_report(
             cur.execute(_INSERT_DRIFT_REPORT, row)
     except psycopg.errors.UndefinedTable:
         raise RuntimeError(_missing_backend_table(DRIFT_REPORTS_TABLE)) from None
+
+
+# Any constant shared by every flow process; only has to be unique in the app database.
+_LABELING_LOCK_ID = 0x6378726C  # "cxrl"
+
+
+@contextmanager
+def labeling_lock(url: str) -> Iterator[None]:
+    """Serializes the labeling flows. The scheduled monitor, the scheduled export, and `make demo`
+    may overlap; this keeps two of them from sending the same case to Label Studio, or from
+    writing data/curated at once. Released when the connection closes, so a crash can't leave it
+    held."""
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(%s)", (_LABELING_LOCK_ID,))
+        yield
+
+
+def known_task_hashes(url: str, hashes: Iterable[str]) -> set[str]:
+    """Which of these files already have a labeling task."""
+    sql = f"SELECT sha256 FROM {LABELING_TASKS_TABLE} WHERE sha256 = ANY(%s)"
+    rows = _query(url, sql, (list(hashes),), ("sha256",))
+    return set(rows["sha256"])
+
+
+_INSERT_TASK = f"""
+INSERT INTO {LABELING_TASKS_TABLE} (sha256, job_id, model_name, model_version, reason, ls_task_id)
+VALUES (%s, %s, %s, %s, %s, %s)
+ON CONFLICT (sha256) DO NOTHING
+"""
+
+
+def record_tasks(url: str, rows: Iterable[tuple[str, str, str, str, str, int]]) -> None:
+    """(sha256, job_id, model_name, model_version, reason, ls_task_id) rows."""
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.executemany(_INSERT_TASK, list(rows))
+    except psycopg.errors.UndefinedTable:
+        raise RuntimeError(_missing_backend_table(LABELING_TASKS_TABLE)) from None
+
+
+@dataclass(frozen=True)
+class TaskRow:
+    """A labeling task with its job's upload details."""
+
+    ls_task_id: int
+    sha256: str
+    status: str
+    labels: dict[str, int] | None
+    image_id: str
+    filename: str
+    format: str
+    raw_key: str
+    patient_id: str
+    patient_sex: str
+    patient_age: int | None
+    view_position: str
+
+
+def read_tasks(url: str) -> list[TaskRow]:
+    sql = f"""
+        SELECT t.ls_task_id, t.sha256, t.status, t.labels, t.image_id, j.filename, j.format,
+               j.raw_key, j.patient_id, j.patient_sex, j.patient_age, j.view_position
+        FROM {LABELING_TASKS_TABLE} t JOIN inference_jobs j ON j.id = t.job_id
+        ORDER BY t.id
+    """
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.execute(sql)
+        return [TaskRow(*row) for row in cur.fetchall()]
+
+
+def mark_exported(
+    url: str, rows: Iterable[tuple[int, Mapping[str, int], str]], dataset_rev: str
+) -> None:
+    """(ls_task_id, labels, image_id) rows that are now in `dataset_rev`."""
+    sql = f"""
+        UPDATE {LABELING_TASKS_TABLE}
+        SET status = '{TASK_EXPORTED}', labels = %s, image_id = %s, dataset_rev = %s,
+            quarantine_reason = '', updated_at = now()
+        WHERE ls_task_id = %s
+    """
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.executemany(
+            sql, [(Jsonb(dict(labels)), image, dataset_rev, task) for task, labels, image in rows]
+        )
+
+
+def mark_quarantined(url: str, rows: Iterable[tuple[int, Mapping[str, int], str]]) -> None:
+    """(ls_task_id, labels, reason) rows: the answer is kept here and goes no further."""
+    sql = f"""
+        UPDATE {LABELING_TASKS_TABLE}
+        SET status = '{TASK_QUARANTINED}', labels = %s, quarantine_reason = %s, updated_at = now()
+        WHERE ls_task_id = %s
+    """
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.executemany(sql, [(Jsonb(dict(labels)), why, task) for task, labels, why in rows])
+
+
+def task_counts(url: str) -> dict[str, int]:
+    sql = f"SELECT status, count(*) FROM {LABELING_TASKS_TABLE} GROUP BY status"
+    rows = _query(url, sql, (), ("status", "n"))
+    return {str(s): int(n) for s, n in zip(rows["status"], rows["n"], strict=True)}
+
+
+def candidate_status(url: str, model_name: str, version: str) -> dict[str, Any] | None:
+    """The version's row in `model_candidates`, or None if it hasn't been gated."""
+    sql = f"""
+        SELECT status, gate_passed, report_uri FROM {CANDIDATES_TABLE}
+        WHERE model_name = %s AND model_version = %s
+    """
+    rows = _query(url, sql, (model_name, version), ("status", "gate_passed", "report_uri"))
+    return None if rows.empty else {str(k): v for k, v in rows.iloc[0].items()}
+
+
+def curated_image_ids(url: str, rev: str) -> set[str]:
+    """The data/curated images of a dataset version; empty for an unknown rev."""
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.execute(DDL)
+        cur.execute(
+            "SELECT image_id FROM dataset_images WHERE dataset_rev = %s AND dvc_path = %s",
+            (rev, "data/curated"),
+        )
+        return {str(r[0]) for r in cur.fetchall()}
+
+
+def latest_retrain_decision(url: str) -> dict[str, Any] | None:
+    sql = f"""
+        SELECT dataset_rev, new_labels, triggered, reason FROM {RETRAIN_DECISIONS_TABLE}
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    """
+    rows = _query(url, sql, (), ("dataset_rev", "new_labels", "triggered", "reason"))
+    return None if rows.empty else {str(k): v for k, v in rows.iloc[0].items()}
+
+
+def last_triggered_rev(url: str) -> str | None:
+    """The dataset rev of the newest retrain that was started."""
+    sql = f"""
+        SELECT dataset_rev FROM {RETRAIN_DECISIONS_TABLE} WHERE triggered
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    """
+    rows = _query(url, sql, (), ("dataset_rev",))
+    return None if rows.empty else str(rows.iloc[0]["dataset_rev"])
+
+
+def last_train_run_id(url: str) -> str | None:
+    """The Prefect flow run of the newest retrain that was started."""
+    sql = f"""
+        SELECT train_flow_run_id FROM {RETRAIN_DECISIONS_TABLE} WHERE triggered
+        ORDER BY created_at DESC, id DESC LIMIT 1
+    """
+    rows = _query(url, sql, (), ("train_flow_run_id",))
+    return None if rows.empty else str(rows.iloc[0]["train_flow_run_id"])
+
+
+def record_retrain_decision(
+    url: str,
+    *,
+    dataset_rev: str,
+    baseline_rev: str,
+    new_labels: int,
+    min_new_labels: int,
+    triggered: bool,
+    reason: str,
+    train_flow_run_id: str,
+    prefect_flow_run_id: str,
+) -> None:
+    sql = f"""
+        INSERT INTO {RETRAIN_DECISIONS_TABLE}
+            (dataset_rev, baseline_rev, new_labels, min_new_labels, triggered, reason,
+             train_flow_run_id, prefect_flow_run_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    row = (dataset_rev, baseline_rev, new_labels, min_new_labels, triggered, reason,
+           train_flow_run_id, prefect_flow_run_id)  # fmt: skip
+    try:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(sql, row)
+    except psycopg.errors.UndefinedTable:
+        raise RuntimeError(_missing_backend_table(RETRAIN_DECISIONS_TABLE)) from None
 
 
 def _query(url: str, sql: str, params: tuple[Any, ...], columns: tuple[str, ...]) -> pd.DataFrame:

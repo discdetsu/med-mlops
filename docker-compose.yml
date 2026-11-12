@@ -3,8 +3,8 @@
 #   full: core + training, monitoring, and labeling loop
 # Flows run on the host (`make seed`, `make train`): in-process under `core`, reporting to
 # prefect-server under `full`. Under `full`, the `monitor` service also runs the monitor flow
-# on a schedule (ADR 0008). A Prefect worker joins `full` in Phase 5, when `should_retrain()`
-# triggers the train deployment.
+# on a schedule (ADR 0008), and `flows-worker` exports labels on a schedule and runs the train
+# deployment that `should_retrain()` starts (ADR 0009).
 name: cxr-mlops
 
 # One set of S3 settings for every client (boto3, MLflow, DVC, aws-cli), so the
@@ -24,6 +24,12 @@ x-s3-env: &s3-env
 x-app-env: &app-env
   CELERY_BROKER_URL: amqp://${RABBITMQ_USER:?set in .env}:${RABBITMQ_PASSWORD:?set in .env}@rabbitmq:5672//
   INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?set in .env}
+
+# Label Studio's admin account: the labeling flows log in with it (cxr_flows.labelstudio).
+x-label-studio-env: &label-studio-env
+  LABEL_STUDIO_URL: http://label-studio:8080
+  LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME:?set in .env}
+  LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD:?set in .env}
 
 x-healthcheck: &healthcheck
   interval: 10s
@@ -249,6 +255,9 @@ services:
       LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME:?set in .env}
       LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD:?set in .env}
       LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+      # Set here rather than through its API: its SSRF guard refuses a private address there, but
+      # trusts the operator's setting. It proxies images from the bucket, so no presigned URLs.
+      S3_ENDPOINT: ${S3_ENDPOINT_URL:-http://rustfs:9000}
     volumes:
       - labelstudio-data:/label-studio/data
     ports:
@@ -262,15 +271,17 @@ services:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
 
   # The monitor flow on a schedule (`flow.serve`): drift + delayed AUROC → Pushgateway and
-  # drift_reports. `docker compose stop monitor` is how the stale alert is demonstrated.
+  # drift_reports, cases for review → Label Studio. `docker compose stop monitor` is how the stale
+  # alert is demonstrated.
   monitor:
     build:
       context: .
       dockerfile: flows/Dockerfile
+      target: monitor
     image: cxr-mlops/monitor:dev
     profiles: [full]
     environment:
-      <<: *s3-env
+      <<: [*s3-env, *label-studio-env]
       APP_DATABASE_URL: postgresql://app:${APP_DB_PASSWORD:?set in .env}@postgres:5432/app
       MLFLOW_TRACKING_URI: http://mlflow:5000
       MLFLOW_HTTP_REQUEST_MAX_RETRIES: "2"
@@ -286,13 +297,54 @@ services:
         condition: service_healthy
       mlflow:
         condition: service_healthy
-      # Its migrations create drift_reports.
+      # Its migrations create drift_reports and labeling_tasks.
       backend:
+        condition: service_healthy
+      label-studio:
         condition: service_healthy
     healthcheck:
       <<: *healthcheck
       start_period: 60s
       # The Prefect runner's webserver (serve(webserver=True)).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+
+  # Serves the `train/retrain` and `label-export/scheduled` deployments, one run at a time
+  # (cxr_flows.deployments). Works on the repo itself, as the host user: data/ and its DVC cache are
+  # tens of GB, and a retrain has to see the data/curated.dvc the export just wrote.
+  flows-worker:
+    build:
+      context: .
+      dockerfile: flows/Dockerfile
+      target: worker
+      args:
+        SKIP: ""
+    image: cxr-mlops/flows-worker:dev
+    profiles: [full]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      <<: [*s3-env, *label-studio-env]
+      APP_DATABASE_URL: postgresql://app:${APP_DB_PASSWORD:?set in .env}@postgres:5432/app
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PUSHGATEWAY_URL: http://pushgateway:9091
+      BACKEND_URL: http://backend:8000
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?set in .env}
+    volumes:
+      - .:/workspace
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      pushgateway:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      label-studio:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck
+      start_period: 60s
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
 
   pushgateway:

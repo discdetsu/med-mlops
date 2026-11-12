@@ -15,7 +15,8 @@ min_subgroup_size: 100   # smaller subgroups are reported, not judged
 max_ece_increase: 0.01
 require_parity: true     # the challenger's E2E parity (ONNX vs PyTorch) must have passed
 # Promote without a person when the gate passes: `make train` runs `promote --auto` after
-# the flow, which approves @challenger if it is marked. For the scripted demo only (Phase 5).
+# the flow, which approves @challenger if it is marked. `make demo` turns it on for its own
+# retrain without changing this default (ADR 0009).
 auto_promote: false
 batch_size: 64           # ONNX Runtime batch for scoring the test set
 seed: 0

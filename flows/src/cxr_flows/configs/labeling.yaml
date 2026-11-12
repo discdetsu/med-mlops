@@ -1,0 +1,19 @@
+# The labeling loop (ADR 0009): which cases reach Label Studio, and when new labels retrain.
+# Drift only ever selects cases for review; it never starts a retrain.
+
+project_title: CXR review
+
+# Cases per monitor pass, on top of every disagreement between the model and reviewer feedback:
+top_k_drift: 25         # the farthest from the reference, from each window that drifted
+random_k: 5             # a random sample of each new window, to limit selection bias
+max_tasks_per_pass: 100 # trims disagreements first, which the next pass selects again
+
+# How often the flows-worker service exports finished annotations (`make label-export` runs one).
+export_interval_seconds: 900
+
+# N of should_retrain(): a retrain needs at least this many curated training images that the
+# newest model version didn't have. ADR 0009 has the reasoning.
+min_new_labels: 50
+train_config: demo      # the profile a triggered retrain runs with
+# Exports wait for a retrain they started; one unfinished after this long is presumed dead.
+retrain_timeout_hours: 12

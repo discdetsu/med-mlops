@@ -20,13 +20,21 @@ ifeq ($(PROFILE),full)
 export PREFECT_API_URL := http://localhost:4200/api
 # `make monitor` pushes its scores like the scheduled `monitor` service does.
 export PUSHGATEWAY_URL := http://localhost:9091
+export LABEL_STUDIO_URL := http://localhost:8080
+export LABEL_STUDIO_USERNAME
+export LABEL_STUDIO_PASSWORD
 endif
+# flows-worker writes to the repo as this user (docker-compose.yml).
+export HOST_UID := $(shell id -u)
+export HOST_GID := $(shell id -g)
 
 CONFIG ?= demo
 SEED_ARGS ?=
 TRAIN_ARGS ?=
 GATE_ARGS ?=
 MONITOR_ARGS ?=
+LABEL_EXPORT_ARGS ?=
+DEMO_ARGS ?=
 ARGS ?=
 PROMETHEUS_IMAGE := prom/prometheus:v3.15.1
 
@@ -42,7 +50,7 @@ seed_source := /seed/$(notdir $(SEED_BUNDLE))
 seed_mount := -v "$(abspath $(dir $(SEED_BUNDLE))):/seed:ro"
 endif
 
-.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration test-rules seed train gate promote rollback bootstrap-champion seed-model smoke monitor replay inject-drift demo
+.PHONY: help install up down clean ps logs lint fmt typecheck test test-integration test-rules seed train gate promote rollback bootstrap-champion seed-model smoke monitor replay inject-drift label-export demo
 
 help:  ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -134,5 +142,14 @@ replay:  ## Send validation images through the API (ARGS="--n 300 --feedback 0.5
 inject-drift:  ## Send AP views only, a slice that differs from the reference (ARGS="--n 200")
 	uv run python scripts/inject_drift.py $(ARGS)
 
-demo:  ## Phase 5: scripted label → retrain → promote loop
-	@echo "not implemented yet (Phase 5)"; exit 1
+# Label Studio is in `full`, so these two always run with its environment.
+ifeq ($(PROFILE),full)
+label-export:  ## Annotations → data/curated → new DVC rev → should_retrain()
+	uv run python -m cxr_flows.label_export $(LABEL_EXPORT_ARGS)
+
+demo:  ## The whole loop with no clicks: drift → labels → new rev → retrain → gate → promote
+	uv run python scripts/demo.py $(DEMO_ARGS)
+else
+label-export demo:
+	@$(MAKE) --no-print-directory $@ PROFILE=full
+endif

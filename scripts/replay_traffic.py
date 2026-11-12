@@ -4,8 +4,8 @@
     make replay ARGS="--n 300 --feedback 0.5"
 
 Uploads images from the validation split (the split the drift reference was built from, so
-a random sample shouldn't drift) with their sex, age, and view as form fields, the way a
-PACS integration would send them. With `--feedback F`, a share F of the finished jobs gets
+a random sample shouldn't drift) with their patient ID, sex, age, and view as form fields, the
+way a PACS integration would send them. With `--feedback F`, a share F of the finished jobs gets
 reviewer feedback with the image's NIH labels, which the monitor flow turns into delayed
 AUROC. `--slice` sends only part of the split; `inject_drift.py` uses it for AP views.
 
@@ -55,7 +55,8 @@ def parse_slice(text: str) -> Callable[[dict[str, str]], bool]:
 
 
 def select(rows: Sequence[dict[str, str]], args: argparse.Namespace) -> list[dict[str, str]]:
-    pool = [r for r in rows if r["split"] == args.split]
+    excluded = set(Path(args.exclude_file).read_text().split()) if args.exclude_file else set()
+    pool = [r for r in rows if r["split"] == args.split and r["image_id"] not in excluded]
     for text in args.slice:
         keep = parse_slice(text)
         pool = [r for r in pool if keep(r)]
@@ -68,7 +69,11 @@ def select(rows: Sequence[dict[str, str]], args: argparse.Namespace) -> list[dic
 def upload(client: httpx.Client, row: dict[str, str], send_metadata: bool) -> str | None:
     path = METADATA.parent / row["file"]
     fields = (
-        {k: row[k] for k in ("patient_sex", "patient_age", "view_position") if row.get(k)}
+        {
+            k: row[k]
+            for k in ("patient_id", "patient_sex", "patient_age", "view_position")
+            if row.get(k)
+        }
         if send_metadata
         else {}
     )
@@ -114,11 +119,15 @@ def send_feedback(client: httpx.Client, job: dict[str, Any], row: dict[str, str]
     if any(c not in row for c in classes):
         return False
     labels = {c: row[c] == "1" for c in classes}
-    response = client.post(
-        f"/api/jobs/{job['id']}/feedback",
-        json={"verdict": "correct", "labels": labels, "comment": "replay: NIH labels"},
-    )
-    return response.status_code == 201
+    for attempt in range(6):
+        response = client.post(
+            f"/api/jobs/{job['id']}/feedback",
+            json={"verdict": "correct", "labels": labels, "comment": "replay: NIH labels"},
+        )
+        if response.status_code != 429:  # nginx rate limit: back off and retry
+            return response.status_code == 201
+        time.sleep(0.5 * 2**attempt)
+    return False
 
 
 def main(argv: Sequence[str] | None = None, *, default_slice: Sequence[str] = ()) -> None:
@@ -130,10 +139,12 @@ def main(argv: Sequence[str] | None = None, *, default_slice: Sequence[str] = ()
         "--slice", action="append", default=list(default_slice),
         help="keep only matching rows, e.g. view_position=AP or patient_age>=70 (repeatable)",
     )  # fmt: skip
+    parser.add_argument("--exclude-file", metavar="PATH",
+                        help="file of image IDs, whitespace-separated, never to send")  # fmt: skip
     parser.add_argument("--feedback", type=float, default=0.0, metavar="SHARE",
                         help="share of finished jobs to give NIH-label feedback (0-1)")  # fmt: skip
     parser.add_argument("--no-metadata", action="store_true",
-                        help="don't send sex, age, and view with the upload")  # fmt: skip
+                        help="don't send patient ID, sex, age, and view")  # fmt: skip
     parser.add_argument("--seed", type=int, default=None, help="sample seed (default: random)")
     parser.add_argument("--base-url", default="http://localhost:8000")
     parser.add_argument("--timeout", type=float, default=300, help="seconds to wait for jobs")

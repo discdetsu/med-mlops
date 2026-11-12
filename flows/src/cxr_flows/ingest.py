@@ -49,7 +49,8 @@ def ensure_frozen(paths: Paths) -> bool:
     """Pull test_locked and golden if they exist in DVC; fail if the workspace copy differs."""
     if not dvc_file(paths.test_locked).exists():
         return False
-    ensure_pinned(paths.root, [paths.test_locked, paths.golden])
+    curated = [paths.curated] if paths.has_curated else []
+    ensure_pinned(paths.root, [paths.test_locked, paths.golden, *curated])
     return True
 
 
@@ -162,7 +163,12 @@ def ingest_flow(
         app_database_url(),
         rev,
         md5s,
-        {"data/nih": data.nih, "data/test_locked": data.test_locked},
+        {
+            "data/nih": data.nih,
+            "data/test_locked": data.test_locked,
+            # A re-ingest doesn't touch reviewer labels, but they are part of the new rev.
+            **({"data/curated": read_metadata(paths.curated)} if paths.has_curated else {}),
+        },
         git_commit(paths.root),
         runtime.flow_run.id,
     )
