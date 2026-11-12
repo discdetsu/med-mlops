@@ -2,7 +2,7 @@
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-This card describes the released seed model, `cxr-classifier` **version 2** (the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2), which `make seed-model` registers as `@champion`). Versions that `make train` or `make demo` produce on your machine are new versions in your MLflow. Each one has its own evaluation report (`reports/evaluation.json` and `.html`) and gate report, and none of them is published.
+This card describes the released seed model: **version 2** of `cxr-classifier` in the MLflow that trained it, published as the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2). `make seed-model` registers it in your MLflow as the next free version, so the UI shows version 1 on a fresh stack; its `origin_model_version` (2) and `origin_mlflow_run_id` tags point back to the training run. Versions that `make train` or `make demo` produce on your machine are new versions in your MLflow. Each one has its own evaluation report (`reports/evaluation.json` and `.html`) and gate report, and none of them is published.
 
 ## Intended use
 

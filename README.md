@@ -4,6 +4,8 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
+![Uploading a chest X-ray, then the heatmap with its opacity slider, then switching between findings](docs/media/demo.gif)
+
 What it shows, end to end on a laptop CPU:
 
 - **Serving:** upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Every prediction records its model version, MLflow run, and DVC dataset rev.
@@ -12,7 +14,7 @@ What it shows, end to end on a laptop CPU:
 
 ## Quickstart: upload → heatmap
 
-Requires Docker with Compose v2, GNU make, and an internet connection for the first build. No GPU, Python, or dataset download needed.
+Requires Docker with Compose v2, GNU make, and an internet connection for the first build. No GPU, no uv, and no dataset download (`make smoke` uses the system `python3`).
 
 ```sh
 git clone https://github.com/discdetsu/med-mlops.git && cd med-mlops
@@ -22,7 +24,20 @@ make seed-model   # downloads the released seed model and registers it as @champ
 
 Open http://localhost:8000 and upload a frontal chest X-ray (PNG, JPEG, or DICOM). [`docs/samples/`](docs/samples/README.md) has three NIH images to try. The page shows the image with a heatmap for the selected finding, the probability of each of the five findings against its threshold, a feedback form, and which model version, dataset rev, and MLflow run produced the result. Django admin is at http://localhost:8000/admin/ (`DJANGO_ADMIN_USER` / `DJANGO_ADMIN_PASSWORD` from `.env`). `make smoke` runs the same flow with curl, and `make down` stops everything.
 
-`make seed-model` downloads `SEED_BUNDLE`, the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2), checks it against its `.sha256`, and registers it in the local MLflow. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway. A bundle you built yourself with `make bootstrap-champion` works too: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`.
+`make seed-model` downloads `SEED_BUNDLE`, the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2), checks it against its `.sha256`, and registers it in the local MLflow. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway. A bundle you built yourself with `make bootstrap-champion` works too: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`. A fresh MLflow registers the seed model as version 1, which is the version the UI shows; its `origin_model_version` lineage tag (2) is the version the [model card](docs/model-card.md) describes.
+
+### What it needs
+
+Measured on 2026-11-12 on a laptop (Linux, 16 GB RAM, no GPU) from a fresh clone, with images built with `--no-cache`. RAM is the sum of `docker stats` over the stack's containers after a few uploads, idle between jobs.
+
+| | `core` | `full` |
+| --- | --- | --- |
+| RAM, idle | 1.5 GiB | 3.3 GiB |
+| Docker images | 4.2 GB | 15.3 GB (includes `core`) |
+| Volumes after seeding | 0.3 GB | 0.5 GB |
+| First `make up` | 3.5 min (2.7 min build, 45 s start) | adds the Prefect, Label Studio, monitoring, and flows images (torch for training) |
+
+Largest containers: under `core` the worker (about 360 MiB with the model loaded), MLflow (300 to 500 MiB), and RustFS (about 300 MiB); `full` adds flows-worker (about 620 MiB idle), Grafana (about 520 MiB), the monitor (about 360 MiB), and Label Studio (about 340 MiB). Training runs on top of that, in the host process for `make train` or in flows-worker for a retrain, and wasn't measured here. Training on the full NIH dataset also takes about 45 GB in RustFS, plus the DVC workspace and cache on the host (up to as much again, less where the filesystem shares them through reflinks). The default `make seed` subset is about 1.6 GB.
 
 ## Architecture
 
