@@ -4,21 +4,59 @@ Chest X-ray abnormality classification with per-class probabilities and a CAM he
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
-Status: **Phase 5, labeling loop.** Upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Training (`make seed && make train`) produces new versions on CPU, a gate compares each one with `@champion` on the locked test set, and a person approves it in Django admin before every worker switches to it. Under the `full` profile, a scheduled monitor flow compares each version's recent predictions with its validation set, computes AUROC from reviewer feedback, and alerts through Prometheus to Discord or Slack. Disagreements and drifted cases go to Label Studio, the labels come back as a new DVC revision, and enough new labels start a retrain; `make demo` plays that whole loop with no clicks. See [`implementation-plan_v2.md`](implementation-plan_v2.md) and [`architecture_v2.html`](architecture_v2.html).
+What it shows, end to end on a laptop CPU:
+
+- **Serving:** upload a chest X-ray in the browser and get per-class probabilities and a class activation map from the `@champion` model, without training anything. Every prediction records its model version, MLflow run, and DVC dataset rev.
+- **Training and promotion:** a Prefect flow trains, evaluates, exports ONNX, and checks PyTorch-vs-ONNX parity on raw golden files. A paired bootstrap gate compares each new version with `@champion` on a frozen locked test set. A person approves it in Django admin, and every worker switches to the new version between jobs.
+- **Monitoring and the labeling loop** (`full` profile): drift per model version with Evidently, delayed AUROC from reviewer feedback, and alerts through Prometheus to Discord or Slack. Disagreements and drifted cases go to Label Studio, the labels come back as a new DVC revision, and enough new labels start a retrain. `make demo` plays that whole loop with no clicks.
 
 ## Quickstart: upload → heatmap
 
-Requires Docker with Compose v2 and GNU make.
+Requires Docker with Compose v2, GNU make, and an internet connection for the first build. No GPU, Python, or dataset download needed.
 
 ```sh
+git clone https://github.com/discdetsu/med-mlops.git && cd med-mlops
 make up           # core profile: builds and starts everything, waits until healthy
-make seed-model   # registers the released seed model as @champion; workers load it
-open http://localhost:8000
+make seed-model   # downloads the released seed model and registers it as @champion
 ```
 
-Upload a frontal chest X-ray (PNG, JPEG, or DICOM). The page shows the image with a heatmap for the selected finding, the probability of each of the five findings against its threshold, a feedback form, and which model version, dataset rev, and MLflow run produced the result. Django admin is at http://localhost:8000/admin/ (`DJANGO_ADMIN_USER` / `DJANGO_ADMIN_PASSWORD` from `.env`). `make smoke` runs the same flow with curl.
+Open http://localhost:8000 and upload a frontal chest X-ray (PNG, JPEG, or DICOM). [`docs/samples/`](docs/samples/README.md) has three NIH images to try. The page shows the image with a heatmap for the selected finding, the probability of each of the five findings against its threshold, a feedback form, and which model version, dataset rev, and MLflow run produced the result. Django admin is at http://localhost:8000/admin/ (`DJANGO_ADMIN_USER` / `DJANGO_ADMIN_PASSWORD` from `.env`). `make smoke` runs the same flow with curl, and `make down` stops everything.
 
-`make seed-model` downloads `SEED_BUNDLE` (a GitHub Release asset, checked against its `.sha256`) and registers it in the local MLflow. The `seed-v2` release isn't published yet, so for now use a bundle you built with `make bootstrap-champion`: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway.
+`make seed-model` downloads `SEED_BUNDLE`, the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2), checks it against its `.sha256`, and registers it in the local MLflow. When a `@champion` already exists it does nothing; add `SEED_MODEL_ARGS=--force` to register the bundle anyway. A bundle you built yourself with `make bootstrap-champion` works too: `make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph core["core profile"]
+        UI["Browser: Svelte UI"] --> NG[Nginx]
+        NG --> DJ["Django + Ninja API, admin"]
+        DJ -- "job" --> MQ[(RabbitMQ)]
+        MQ --> WK["Celery worker: ONNX Runtime + CAM"]
+        WK -- "results" --> DJ
+        DJ --> PG[(PostgreSQL)]
+        DJ -- "uploads, heatmaps" --> S3[(RustFS S3)]
+        WK -- "load @champion bundle" --> S3
+        DJ -- "approve: move @champion" --> ML["MLflow tracking + registry"]
+        DJ -- "model.events fanout" --> MQ
+        ML --> S3
+    end
+    subgraph full["full profile adds"]
+        PF["Prefect: train, gate, monitor, label-export"]
+        LS[Label Studio]
+        PR["Prometheus + Pushgateway"] --> AM[Alertmanager] --> CH["Discord / Slack"]
+        PR --> GF[Grafana]
+    end
+    PF -- "@challenger + gate report" --> ML
+    PF -- "DVC dataset revs" --> S3
+    PF -- "predictions, feedback" --> PG
+    PF -- "cases to review" --> LS
+    LS -- "labels: new rev, then retrain" --> PF
+    PF -- "drift scores" --> PR
+    PR -- "scrape /metrics" --> DJ
+```
+
+[`architecture_v2.html`](architecture_v2.html) has the detailed poster, and [`implementation-plan_v2.md`](implementation-plan_v2.md) has the build plan with what was checked at each phase.
 
 How a request flows: Nginx → Django stores the upload in RustFS and queues a job on RabbitMQ → a Celery worker (ONNX Runtime, no torch) runs `cxr_core.preprocess` → ONNX → CAM and posts the result back → the UI polls for it. When `@champion` moves, a `model.events` fanout tells every worker to load the new version between jobs. Jobs that can never succeed go to the `dlq` queue. See [ADR 0005](docs/adr/0005-async-inference-queue.md).
 
@@ -105,7 +143,7 @@ A retrain runs in `flows-worker` on the repo itself, ends with the promotion gat
 
 ```sh
 make up PROFILE=full
-make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz
+make seed-model
 make demo   # DEMO_ARGS="--n 200 --feedback 0.6"; about 40 minutes on a laptop CPU
 ```
 
@@ -158,16 +196,27 @@ scripts/               download_nih.py, bootstrap_champion.py, smoke_core.sh, wa
 tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
 docs/model-card.md     data, classes, metrics, limitations
+docs/samples/          three NIH images to try the UI with
 ```
 
 ## Decisions
 
-See [`docs/adr/`](docs/adr/README.md).
+One ADR per decision in [`docs/adr/`](docs/adr/README.md): RustFS as the object store, the `core`/`full` profiles, the patient split and locked test set, ONNX with GAP + linear heads so CAM is exact, the async queue, the human promotion gate, drift monitoring, label-driven retraining, and publishing the seed weights. The model, its data, metrics, and limitations are in the [model card](docs/model-card.md).
 
-## License
+## Limitations
 
-Code: [MIT](LICENSE).
+- **Not a medical device.** No clinical validation, no regulatory review, and the UI says so on every page. The heatmaps show where the model looked, not where the finding is.
+- **The model is a pipeline demo.** The seed model is ResNet18 at 128 px trained on CPU with 5% of the training images. Macro AUROC on the locked test set is 0.708, below published NIH baselines, and it is much worse on AP views (0.642) than on PA views (0.740). See the [model card](docs/model-card.md).
+- **NIH labels are noisy:** they were mined from radiology reports by NLP and come from one institution, which caps every metric here and says nothing about other scanners or populations.
+- **Training needs the pinned data.** The committed DVC pointers pin a dataset that lives only in the RustFS of the machine that seeded it, so a fresh clone can serve and promote but has to `make seed` its own dataset, with its own locked test set, before it can train (see below).
+- **Single node, no HA:** one Postgres, one RustFS, one RabbitMQ. Workers scale (`--scale worker=N`), the rest doesn't.
+- **Auth is Django's built-in only**, the API has no per-user auth, and `.env.example` ships local passwords. Change them for anything other than a laptop demo.
+- **Not exercised end to end:** a person labeling in the Label Studio UI (`make demo` labels through its API), and shadow mode and a per-image OOD flag, which were cut.
 
-Data: NIH ChestX-ray14, provided by the NIH Clinical Center. The images are not redistributed here; `make seed` downloads them from the public Kaggle mirror, and you are bound by the dataset's own terms (see the [NIH release](https://nihcc.app.box.com/v/ChestXray-NIHCC)). If you use it, cite:
+## License and data
 
-> Wang X, Peng Y, Lu L, Lu Z, Bagheri M, Summers RM. ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks on Weakly-Supervised Classification and Localization of Common Thorax Diseases. IEEE CVPR 2017.
+- **Code:** [MIT](LICENSE).
+- **Seed model weights** ([`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2)): trained on NIH ChestX-ray14 and distributed under the dataset's terms, with its attribution. Redistribute them with the same attribution. See [ADR 0010](docs/adr/0010-publish-seed-weights.md).
+- **Data:** NIH ChestX-ray14, provided by the **NIH Clinical Center**, https://nihcc.app.box.com/v/ChestXray-NIHCC. The dataset's terms place no restrictions on use but require a link to that site, acknowledgement of the NIH Clinical Center, and the citation below. The repo includes only the three sample images in [`docs/samples/`](docs/samples/README.md); `make seed` downloads the rest from the public Kaggle mirror.
+
+> Wang X, Peng Y, Lu L, Lu Z, Bagheri M, Summers RM. ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks on Weakly-Supervised Classification and Localization of Common Thorax Diseases. IEEE CVPR 2017, pp. 3462–3471.

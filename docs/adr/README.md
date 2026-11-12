@@ -13,3 +13,4 @@ One file per decision, written when the decision is made. Copy `template.md`, ta
 | [0007](0007-human-promotion-gate.md) | Paired patient-level bootstrap gate on the locked test set, then approval in Django admin; rollback to `@previous` | Accepted |
 | [0008](0008-monitoring-drift-and-alerts.md) | Each version's recent predictions vs its own drift reference with Evidently, delayed AUROC from feedback, alerts through Prometheus and Alertmanager; never retrains | Accepted |
 | [0009](0009-label-driven-retraining.md) | New labels start retraining, not drift; labels reach training only through Pandera checks, quarantine, and a new DVC rev; `flows-worker` runs the deployment | Accepted |
+| [0010](0010-publish-seed-weights.md) | Publish the seed model as the `seed-v2` GitHub Release under the NIH data terms, with their attribution | Accepted |
