@@ -41,39 +41,15 @@ Largest containers: under `core` the worker (about 360 MiB with the model loaded
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph core["core profile"]
-        UI["Browser: Svelte UI"] --> NG[Nginx]
-        NG --> DJ["Django + Ninja API, admin"]
-        DJ -- "job" --> MQ[(RabbitMQ)]
-        MQ --> WK["Celery worker: ONNX Runtime + CAM"]
-        WK -- "results" --> DJ
-        DJ --> PG[(PostgreSQL)]
-        DJ -- "uploads, heatmaps" --> S3[(RustFS S3)]
-        WK -- "load @champion bundle" --> S3
-        DJ -- "approve: move @champion" --> ML["MLflow tracking + registry"]
-        DJ -- "model.events fanout" --> MQ
-        ML --> S3
-    end
-    subgraph full["full profile adds"]
-        PF["Prefect: train, gate, monitor, label-export"]
-        LS[Label Studio]
-        PR["Prometheus + Pushgateway"] --> AM[Alertmanager] --> CH["Discord / Slack"]
-        PR --> GF[Grafana]
-    end
-    PF -- "@challenger + gate report" --> ML
-    PF -- "DVC dataset revs" --> S3
-    PF -- "predictions, feedback" --> PG
-    PF -- "cases to review" --> LS
-    LS -- "labels: new rev, then retrain" --> PF
-    PF -- "drift scores" --> PR
-    PR -- "scrape /metrics" --> DJ
-```
+[![Architecture: DVC and Label Studio feed a Prefect training flow that registers versions in MLflow; a promotion gate and Django admin approval move @champion; Nginx, Django, RabbitMQ, and Celery workers serve predictions; a monitor flow reports drift through Pushgateway, Prometheus, Alertmanager, and Grafana](docs/media/architecture.svg)](docs/media/architecture.svg)
 
-[`architecture_v2.html`](architecture_v2.html) has the detailed poster, and [`implementation-plan_v2.md`](implementation-plan_v2.md) has the build plan with what was checked at each phase.
+Dotted services are the `core` containers. The training flow runs under `core` too, as `make train` on the host. `full` adds the Prefect server, Label Studio, and the monitoring services. Solid arrows are direct calls and dashed ones are async or orchestrated. Read it as three loops:
 
-How a request flows: Nginx → Django stores the upload in RustFS and queues a job on RabbitMQ → a Celery worker (ONNX Runtime, no torch) runs `cxr_core.preprocess` → ONNX → CAM and posts the result back → the UI polls for it. When `@champion` moves, a `model.events` fanout tells every worker to load the new version between jobs. Jobs that can never succeed go to the `dlq` queue. See [ADR 0005](docs/adr/0005-async-inference-queue.md).
+- **Serving** (green, right): Nginx → Django stores the upload in RustFS and queues a job on RabbitMQ → a Celery worker (ONNX Runtime, no torch) runs `cxr_core.preprocess` → ONNX → CAM and posts the result back, with its `model_version` → the UI polls for it. When `@champion` moves, a `model.events` fanout tells every worker to load the new version between jobs, and jobs that can never succeed go to the `dlq` queue ([ADR 0005](docs/adr/0005-async-inference-queue.md)).
+- **Training and promotion** (blue, top): a new DVC rev with enough new labels starts the Prefect flow. It registers `@challenger` with its thresholds and drift reference, the gate compares it with `@champion`, and approval in Django admin moves the alias and fans the version out to the workers.
+- **Monitoring and labeling** (orange and purple, bottom and left): the monitor flow compares each version's predictions with its own reference and pushes scores to Prometheus. Drifted cases and disagreements go to Label Studio, and their labels come back as a new DVC rev.
+
+The [build plan](implementation-plan_v2.md) has what was checked at each phase.
 
 ## Training and development
 
@@ -212,6 +188,7 @@ tests/integration/     tests against the running core stack
 docs/adr/              architecture decision records
 docs/model-card.md     data, classes, metrics, limitations
 docs/samples/          three NIH images to try the UI with
+docs/media/            the README's demo GIF and architecture diagram
 ```
 
 ## Decisions
