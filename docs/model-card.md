@@ -2,6 +2,14 @@
 
 > **Not a medical device.** This is a portfolio project. It is not clinically validated and must not be used for diagnosis.
 
+This card describes the released seed model: **version 2** of `cxr-classifier` in the MLflow that trained it, published as the [`seed-v2` release](https://github.com/discdetsu/med-mlops/releases/tag/seed-v2). `make seed-model` registers it in your MLflow as the next free version, so the UI shows version 1 on a fresh stack; its `origin_model_version` (2) and `origin_mlflow_run_id` tags point back to the training run. Versions that `make train` or `make demo` produce on your machine are new versions in your MLflow. Each one has its own evaluation report (`reports/evaluation.json` and `.html`) and gate report, and none of them is published.
+
+## Intended use
+
+- **For:** showing an MLOps loop around a medical-imaging model (serving, lineage, promotion, monitoring, relabeling) on a laptop, and reading or reusing its code.
+- **Not for:** diagnosis, triage, screening, second reads, or any decision about a patient. It has no clinical validation or regulatory clearance, and its accuracy is well below what clinical use would need.
+- **Inputs:** one frontal (PA or AP) adult chest X-ray as PNG, JPEG, or DICOM (`MONOCHROME1`/`2`, linear windowing). Lateral views, pediatric images, and photos of films are out of distribution. The model doesn't detect them; the monitoring detects them only as drift across a whole window.
+
 ## Model
 
 - **Task:** multi-label classification of 5 findings on frontal chest X-rays, with a class activation map per finding.
@@ -11,7 +19,7 @@
 
 ## Data
 
-[NIH ChestX-ray14](https://nihcc.app.box.com/v/ChestXray-NIHCC): 112,120 frontal PNGs (1024 × 1024) of 30,805 patients, de-identified by NIH, with 14 findings mined from radiology reports by NLP. The split is a hash of the patient ID, 70/15/15, so no patient is in more than one split ([ADR 0003](adr/0003-dataset-versions-and-locked-test.md)).
+[NIH ChestX-ray14](https://nihcc.app.box.com/v/ChestXray-NIHCC), provided by the NIH Clinical Center (Wang et al., CVPR 2017; full citation at the end): 112,120 frontal PNGs (1024 × 1024) of 30,805 patients, de-identified by NIH, with 14 findings mined from radiology reports by NLP. The split is a hash of the patient ID, 70/15/15, so no patient is in more than one split ([ADR 0003](adr/0003-dataset-versions-and-locked-test.md)).
 
 **Current dataset, `dataset_rev` `f774f7a855ab`:** every NIH image, at NIH's own prevalence.
 
@@ -62,6 +70,8 @@ From the `@champion` version's `reports/evaluation.json` in MLflow. Thresholds a
 | Mass | 851 | 0.644 (0.624 to 0.664) | 0.208 | 0.042 | 0.632 | 0.567 | 0.008 |
 | Pneumothorax | 721 | 0.748 (0.730 to 0.764) | 0.359 | 0.039 | 0.707 | 0.659 | 0.004 |
 
+Subgroups are point estimates without CIs. The promotion gate compares them between versions with a 0.02 margin, but only for subgroups of at least `min_subgroup_size` images ([ADR 0007](adr/0007-human-promotion-gate.md)).
+
 | Subgroup | n | Macro AUROC |
 | --- | --- | --- |
 | Male | 9,279 | 0.702 |
@@ -102,3 +112,9 @@ This version proves the pipeline, not the model. On the full dataset at 224 px o
 - **One institution:** all images come from the NIH Clinical Center, so performance on other scanners, protocols, or populations is unknown, which is what the Phase 4 drift monitoring is for.
 - **Shortcuts:** AP views are mostly inpatient and sicker patients, and pneumothorax images often show chest drains. The model can learn these instead of the finding; the view subgroup results are the first place to look.
 - **Low resolution in `demo`:** at 128 px, small findings are lost and the CAM is a 4 × 4 grid upsampled to the image.
+
+## Data terms and citation
+
+The NIH ChestX-ray14 terms place no restrictions on use, and require a link to https://nihcc.app.box.com/v/ChestXray-NIHCC, acknowledgement of the NIH Clinical Center as the data provider, and this citation. The weights carry the same attribution ([ADR 0010](adr/0010-publish-seed-weights.md)).
+
+> Wang X, Peng Y, Lu L, Lu Z, Bagheri M, Summers RM. ChestX-ray8: Hospital-scale Chest X-ray Database and Benchmarks on Weakly-Supervised Classification and Localization of Common Thorax Diseases. IEEE CVPR 2017, pp. 3462–3471.

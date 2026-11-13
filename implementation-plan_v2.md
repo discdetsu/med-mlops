@@ -1,16 +1,16 @@
 # CXR MLOps Implementation Plan v2
 
-Last updated: 2026-11-05 · No deadlines: phases are ordered by dependency.
+Last updated: 2026-11-12 · No deadlines: phases are ordered by dependency.
 
 ## Goal and definition of done
 
 The project is done when someone who opens the repo can run `docker compose --profile core up`, upload a CXR image, and see probabilities and a CAM heatmap without training anything, and the `full` profile proves that the label → retrain → gate → promote → monitor loop works at least once.
 
-- [ ] `core` starts with one command on a laptop without a GPU and ships with a seeded `@champion`
-- [ ] `full` runs one scripted demo end to end: drift → Label Studio → new labels → new DVC rev → retrain → gate → approve → worker loads vN
-- [ ] Every prediction traces back to its `model_version`, MLflow run, and DVC rev
+- [x] `core` starts with one command on a laptop without a GPU and ships with a seeded `@champion` (`make up`, then `make seed-model` from the `seed-v2` release)
+- [x] `full` runs one scripted demo end to end: drift → Label Studio → new labels → new DVC rev → retrain → gate → approve → worker loads vN
+- [x] Every prediction traces back to its `model_version`, MLflow run, and DVC rev
 - [ ] CI passes: unit tests, the E2E parity test, and the `core` smoke test
-- [ ] README has a demo GIF, architecture diagram, quickstart, ADRs, measured RAM, and a disclaimer that this is not a medical device
+- [x] README has a demo GIF, architecture diagram, quickstart, ADRs, measured RAM, and a disclaimer that this is not a medical device
 
 | Profile | Services | Purpose |
 | --- | --- | --- |
@@ -126,11 +126,11 @@ This is the milestone the showcase needs: fresh clone → `make up` → `make se
 - [x] Svelte + Vite: upload, job status, viewer with heatmap overlay and opacity slider, per-class probabilities with threshold markers, feedback form (agree or correct labels). The viewer is a plain canvas (cut list item 5) rather than Cornerstone3D: the worker renders a display PNG, so the browser never decodes DICOM
 - [x] "Not for clinical use" banner on every page
 - [x] Nginx: `/api` and `/admin` to the backend, `/` serves static files, rate limiting, and an upload size limit
-- [ ] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion` (`SEED_BUNDLE=dist/…` for a local one). The release itself (`gh release create seed-v2 …`) waits on the NIH terms decision below
+- [x] `make seed-model` downloads the seed bundle from the GitHub Release and registers it as `@champion` (`SEED_BUNDLE=dist/…` for a local one). The `seed-v2` release was published on 2026-11-12 (ADR 0010)
 
 **Done when** a fresh clone runs the three commands above, uploads an image from the golden set, shows the heatmap, and the prediction row has the correct `model_version`. A CI smoke test runs the same flow with `curl` (**M2**).
 
-**Not met yet:** everything works with a local bundle (`make seed-model SEED_BUNDLE=dist/cxr-seed-bundle-v2.tar.gz`), but a fresh clone can't seed until the `seed-v2` release is published. Until then the CI smoke job skips with a warning.
+**Met** on 2026-11-12, with the `seed-v2` release published: the fresh-clone check in Phase 6 ran the three commands, seeded from the release URL, and `make smoke` got a prediction from the seeded `@champion`. The CI smoke job stops skipping once this reaches `main`.
 
 ## Phase 3: Registry + promotion
 
@@ -200,15 +200,17 @@ Close the loop: drifted cases and cases where the model and the radiologist disa
 
 Someone new to the project should understand it and run `core` from one read of the README, since most visitors only see the README and the GIF.
 
-- [ ] README: upload → heatmap GIF at the top, architecture diagram, three-command `core` quickstart, how to run `make demo`, measured RAM and disk for both profiles, limitations
-- [ ] Complete ADRs: RustFS, core/full profiles, async queue, ONNX + CAM constraint, human gate, label-driven retraining
-- [ ] Model card: data, classes, metrics with CIs, subgroups, limitations of the NIH labels
-- [ ] "Not a medical device" disclaimer in the README, the UI, and the model card
-- [ ] Code license and dataset citation/terms
-- [ ] CI smoke test for `core` and the parity test run on every push to `main`
-- [ ] Fresh-clone check: follow the README line by line on a machine that has never run the project (or a CI runner)
+- [x] README: upload → heatmap GIF at the top, architecture diagram, three-command `core` quickstart, how to run `make demo`, measured RAM and disk for both profiles, limitations
+- [x] Complete ADRs: RustFS, core/full profiles, async queue, ONNX + CAM constraint, human gate, label-driven retraining (0001 to 0009), plus publishing the seed weights (0010)
+- [x] Model card: intended use, data, classes, metrics with CIs, subgroups, limitations of the NIH labels
+- [x] "Not a medical device" disclaimer in the README, the UI, and the model card
+- [x] Code license and dataset citation/terms; the weights carry the NIH attribution
+- [x] CI smoke test for `core` and the parity test run on every push to `main` (parity runs in `make test` on every push and PR; the smoke job ran on a skip until `seed-v2` was published)
+- [x] Fresh-clone check: follow the README line by line on a machine that has never run the project (or a CI runner)
 
 **Done when** a fresh clone following the README gets the `core` demo working with no extra questions, and the first release is tagged (**M4**).
+
+**Checked** on 2026-11-12. The `seed-v2` release was published (ADR 0010), and the download matched its `.sha256`. A clone of this branch ran as its own Compose project (`-p cxr-fresh`, since `name: cxr-mlops` would have reused the main stack's volumes) with empty volumes, and its `core` images were built with `--no-cache --pull`. It followed the quickstart: `make up` (2.7 min build, 45 s start, every service healthy), then `make seed-model` with no arguments (21 s from the release URL, registered as version 1), then `make smoke` with each of the three `docs/samples/` images, all predicted by version 1. The README's GIF was recorded against that stack. `make up PROFILE=full` then brought all `full` services to healthy, and the RAM and disk table in the README comes from the two stacks. Not done: a machine with an empty Docker cache (base images and the `full` images were local), which the CI smoke job covers on the first push to `main`; and the M4 tag, which waits until this branch reaches `main`.
 
 ## Testing strategy
 
@@ -254,6 +256,6 @@ The biggest risk is scope: if M2 is not done, the repo has nothing to show, so M
 - [x] N for `should_retrain()`. Decided: 50 new training labels, a throttle on cost and not a statistical threshold (ADR 0009)
 - [x] The gate margin. Decided: 0.02 for both the macro bound and the subgroup point estimates; reasoning and the measured CI widths are in ADR 0007
 - [x] Which 5 to 6 classes to use. Decided: Atelectasis, Cardiomegaly, Effusion, Mass, Pneumothorax (see the model card)
-- [ ] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release
+- [x] NIH ChestX-ray14 terms for distributing model weights in a GitHub Release. Decided: the terms place no restrictions on use and require a link, acknowledgement of the NIH Clinical Center, and the CVPR 2017 citation, so the weights are published with that attribution (ADR 0010)
 - [x] Diagram v2 says `cxr_preprocess` while this plan uses `cxr_core` from v1; pick one name. Decided: `cxr_core` (diagram updated)
 - [x] Internal API auth (shared token or a separate network). Decided: both; a bearer token on `/internal/*`, which Nginx also doesn't route (ADR 0005)

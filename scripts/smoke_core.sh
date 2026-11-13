@@ -6,29 +6,14 @@ set -eu
 
 base=${BASE_URL:-http://localhost:8000}
 mlflow=${MLFLOW_URL:-http://localhost:5000}
-image=${1:-data/golden/png/00000001_000.png}
+image=${1:-docs/samples/00019087_046_effusion.png}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 fail() { echo "smoke: FAIL: $*" >&2; exit 1; }
 field() { python3 -c "import json, sys; d = json.load(sys.stdin); print($1)"; }
 
-if [ ! -f "$image" ]; then
-    # The golden set lives in DVC, so fresh clones and CI don't have it. A synthetic PNG
-    # takes the same path through the stack; this test checks plumbing, not accuracy.
-    image=$tmp/synthetic.png
-    python3 - "$image" <<'PY'
-import struct, sys, zlib
-w = h = 256
-rows = b"".join(b"\0" + bytes((x + y) // 2 for x in range(w)) for y in range(h))
-def chunk(kind, data):
-    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
-       + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
-open(sys.argv[1], "wb").write(png)
-PY
-    echo "smoke: no golden image here, using a synthetic one"
-fi
+[ -f "$image" ] || fail "no image at $image"
 
 champion=$(curl -fsS "$mlflow/api/2.0/mlflow/registered-models/alias?name=cxr-classifier&alias=champion" \
     | field 'd["model_version"]["version"]') || fail "no @champion in MLflow; run make seed-model"
